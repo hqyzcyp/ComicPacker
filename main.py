@@ -7,6 +7,7 @@ Comic Packer - 将ZIP文件中的漫画图片打包成PDF
 import os
 import zipfile
 import re
+import argparse
 from pathlib import Path
 from typing import List, Tuple
 from PIL import Image
@@ -74,8 +75,12 @@ def extract_chapter_name(zip_filename: str) -> str:
 
 def create_title_page(c: canvas.Canvas, title: str, page_width: float, page_height: float):
     """
-    创建章节标题页
+    创建章节标题页，并添加PDF书签
     """
+    # 在创建新页面之前添加书签（书签指向当前页）
+    c.bookmarkPage(title)
+    c.addOutlineEntry(title, title, level=0)
+    
     c.setFont("Helvetica-Bold", 36)
     
     # 在页面中央绘制标题
@@ -123,11 +128,11 @@ def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, pag
 
 
 def create_pdf_from_chapters(zip_files: List[str], folder_path: str, 
-                            output_filename: str, batch_number: int):
+                            output_filename: str, batch_number: int, output_folder: str = './output'):
     """
-    从多个ZIP文件创建一个PDF文件
+    从多个ZIP文件创建一个PDF文件，并为每个章节添加书签
     """
-    output_path = os.path.join(folder_path, output_filename)
+    output_path = os.path.join(output_folder, output_filename)
     
     # 使用A4页面大小，也可以根据需要调整
     page_width, page_height = A4
@@ -143,7 +148,7 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
         
         print(f"  处理章节: {chapter_name}")
         
-        # 添加章节标题页
+        # 添加章节标题页（会自动添加书签）
         create_title_page(c, chapter_name, page_width, page_height)
         
         # 获取章节中的所有图片
@@ -156,16 +161,22 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     
     c.save()
     print(f"✓ PDF创建完成: {output_filename}")
+    print(f"  已添加 {len(zip_files)} 个章节书签")
 
 
-def pack_comics_to_pdf(folder_path: str, batch_size: int = 10):
+def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "漫画合集", output_folder: str = './output'):
     """
     主函数：将文件夹中的ZIP文件按批次打包成PDF
     
     参数:
         folder_path: 包含ZIP文件的文件夹路径
         batch_size: 每个PDF包含的章节数量（默认10）
+        pdf_prefix: PDF文件名前缀（默认"漫画合集"）
+        output_folder: 输出PDF文件的文件夹路径（默认'./output'）
     """
+    # 创建输出文件夹（如果不存在）
+    os.makedirs(output_folder, exist_ok=True)
+    
     # 获取所有ZIP文件并排序
     zip_files = get_sorted_zip_files(folder_path)
     
@@ -175,6 +186,8 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10):
     
     print(f"找到 {len(zip_files)} 个ZIP文件")
     print(f"批次大小: {batch_size} 个章节/PDF")
+    print(f"PDF文件名前缀: {pdf_prefix}")
+    print(f"输出文件夹: {output_folder}")
     
     # 分批处理
     total_batches = (len(zip_files) + batch_size - 1) // batch_size
@@ -188,18 +201,59 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10):
         # 生成输出文件名
         first_chapter = extract_chapter_name(batch_files[0])
         last_chapter = extract_chapter_name(batch_files[-1])
-        output_filename = f"漫画合集_{first_chapter}_to_{last_chapter}.pdf"
+        output_filename = f"{pdf_prefix}_{first_chapter}_to_{last_chapter}.pdf"
         
         # 创建PDF
-        create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1)
+        create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1, output_folder)
     
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
 
 
 if __name__ == "__main__":
-    # 配置参数
-    COMIC_FOLDER = "./comic"  # ZIP文件所在文件夹
-    BATCH_SIZE = 10  # 每个PDF包含的章节数量
+    # 创建命令行参数解析器
+    parser = argparse.ArgumentParser(
+        description="Comic Packer - 将ZIP文件中的漫画图片打包成PDF",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python main.py                                    # 使用默认设置
+  python main.py --prefix "我的漫画"                 # 自定义文件名前缀
+  python main.py --batch-size 15                    # 每15个章节一个PDF
+  python main.py --folder ./comics --prefix "寓言杀手"  # 指定文件夹和前缀
+  python main.py --output ./my_pdfs  # 指定自定义输出文件夹
+        """
+    )
+    
+    parser.add_argument(
+        '--folder',
+        type=str,
+        default='./comic',
+        help='包含ZIP文件的文件夹路径 (默认: ./comic)'
+    )
+    
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=10,
+        help='每个PDF包含的章节数量 (默认: 10)'
+    )
+    
+    parser.add_argument(
+        '--prefix',
+        type=str,
+        default='漫画合集',
+        help='PDF文件名前缀 (默认: 漫画合集)'
+    )
+    
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='./output',
+        help='输出PDF文件的文件夹路径 (默认: ./output)'
+    )
+    
+    # 解析命令行参数
+    args = parser.parse_args()
     
     # 执行打包
-    pack_comics_to_pdf(COMIC_FOLDER, BATCH_SIZE)
+    pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output)
