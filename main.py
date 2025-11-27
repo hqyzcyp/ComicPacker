@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Comic Packer - 将ZIP文件中的漫画图片打包成PDF
-按章节顺序分批次打包，每批默认10个章节，每章节包含标题页
+按章节顺序分批次打包，每批默认10个章节，每章节第一页带标题索引
 """
 
 import os
@@ -145,6 +145,8 @@ def create_title_page(c: canvas.Canvas, title: str, page_width: float, page_heig
 def create_image_cover_page(c: canvas.Canvas, title: str, image_data: bytes, page_width: float, page_height: float):
     """
     创建带图片封面的标题页，并添加PDF书签
+    
+    注意：此函数会根据图片的宽高比动态调整页面大小，以确保图片完全填充页面且无空白
     """
     # 在创建新页面之前添加书签（书签指向当前页）
     c.bookmarkPage(title)
@@ -157,24 +159,26 @@ def create_image_cover_page(c: canvas.Canvas, title: str, image_data: bytes, pag
         # 获取图片尺寸
         img_width, img_height = img.size
         
-        # 计算缩放比例以填充页面
-        width_ratio = page_width / img_width
-        height_ratio = page_height / img_height
+        # 计算图片的宽高比
+        img_aspect_ratio = img_width / img_height
+        page_aspect_ratio = page_width / page_height
         
-        # 使用较小的比例以确保图片完全适应页面
-        scale = min(width_ratio, height_ratio)
+        # 根据宽高比调整页面大小，使图片能够完全填充页面
+        if img_aspect_ratio > page_aspect_ratio:
+            # 图片更宽，以宽度为准
+            actual_width = page_width
+            actual_height = page_width / img_aspect_ratio
+        else:
+            # 图片更高，以高度为准
+            actual_height = page_height
+            actual_width = page_height * img_aspect_ratio
         
-        # 计算缩放后的尺寸
-        scaled_width = img_width * scale
-        scaled_height = img_height * scale
+        # 设置当前页面大小
+        c.setPageSize((actual_width, actual_height))
         
-        # 居中图片
-        x = (page_width - scaled_width) / 2
-        y = (page_height - scaled_height) / 2
-        
-        # 将图片绘制到PDF
+        # 将图片绘制到PDF（完全填充页面，无边距）
         img_reader = ImageReader(io.BytesIO(image_data))
-        c.drawImage(img_reader, x, y, width=scaled_width, height=scaled_height)
+        c.drawImage(img_reader, 0, 0, width=actual_width, height=actual_height)
         c.showPage()
         
     except Exception as e:
@@ -183,9 +187,12 @@ def create_image_cover_page(c: canvas.Canvas, title: str, image_data: bytes, pag
         create_title_page(c, title, page_width, page_height)
 
 
-def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, page_height: float):
+def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, page_height: float, chapter_title: str = None):
     """
     将图片添加到PDF页面，边距为0，图片填充整个页面
+    如果提供了chapter_title，会在图片顶部添加章节标题索引
+    
+    注意：此函数会根据图片的宽高比动态调整页面大小，以确保图片完全填充页面且无空白
     """
     try:
         # 从字节数据创建PIL图片
@@ -194,24 +201,52 @@ def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, pag
         # 获取图片尺寸
         img_width, img_height = img.size
         
-        # 计算缩放比例以填充页面
-        width_ratio = page_width / img_width
-        height_ratio = page_height / img_height
+        # 计算图片的宽高比
+        img_aspect_ratio = img_width / img_height
+        page_aspect_ratio = page_width / page_height
         
-        # 使用较小的比例以确保图片完全适应页面
-        scale = min(width_ratio, height_ratio)
+        # 根据宽高比调整页面大小，使图片能够完全填充页面
+        if img_aspect_ratio > page_aspect_ratio:
+            # 图片更宽，以宽度为准
+            actual_width = page_width
+            actual_height = page_width / img_aspect_ratio
+        else:
+            # 图片更高，以高度为准
+            actual_height = page_height
+            actual_width = page_height * img_aspect_ratio
         
-        # 计算缩放后的尺寸
-        scaled_width = img_width * scale
-        scaled_height = img_height * scale
+        # 设置当前页面大小
+        c.setPageSize((actual_width, actual_height))
         
-        # 居中图片
-        x = (page_width - scaled_width) / 2
-        y = (page_height - scaled_height) / 2
-        
-        # 将图片绘制到PDF
+        # 将图片绘制到PDF（完全填充页面，无边距）
         img_reader = ImageReader(io.BytesIO(image_data))
-        c.drawImage(img_reader, x, y, width=scaled_width, height=scaled_height)
+        c.drawImage(img_reader, 0, 0, width=actual_width, height=actual_height)
+        
+        # 如果提供了章节标题，在图片上叠加索引信息
+        if chapter_title:
+            # 添加PDF书签
+            c.bookmarkPage(chapter_title)
+            c.addOutlineEntry(chapter_title, chapter_title, level=0)
+            
+            # # 设置半透明黑色背景
+            # c.setFillColorRGB(0, 0, 0, alpha=0.7)
+            
+            # # 计算标题栏的位置和大小
+            # title_height = 60
+            # title_y = actual_height - title_height
+            # c.rect(0, title_y, actual_width, title_height, fill=True, stroke=False)
+            
+            # # 设置白色文字
+            # c.setFillColorRGB(1, 1, 1)
+            # c.setFont("Helvetica-Bold", 28)
+            
+            # # 在标题栏中央绘制章节标题
+            # text_width = c.stringWidth(chapter_title, "Helvetica-Bold", 28)
+            # text_x = (actual_width - text_width) / 2
+            # text_y = title_y + (title_height - 28) / 2 + 5
+            
+            # c.drawString(text_x, text_y, chapter_title)
+        
         c.showPage()
         
     except Exception as e:
@@ -225,10 +260,9 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     """
     output_path = os.path.join(output_folder, output_filename)
     
-    # 使用A4页面大小，也可以根据需要调整
-    page_width, page_height = A4
+    page_width, page_height = 1264, 1680
     
-    c = canvas.Canvas(output_path, pagesize=A4)
+    c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
     
     print(f"\n创建PDF: {output_filename}")
     print(f"包含章节: {', '.join([extract_chapter_name(z) for z in zip_files])}")
@@ -259,7 +293,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
     """
     按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
     - 使用最小章节的第一张图片作为整本书的封面
-    - 每个章节开头添加一页带章节名的索引页
+    - 每个章节的第一页图片上叠加章节名称索引
     
     参数:
         folder_path: 包含ZIP文件的文件夹路径
@@ -281,7 +315,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
     print(f"PDF文件名前缀: {pdf_prefix}")
     print(f"输出文件夹: {output_folder}")
     
-    page_width, page_height = A4
+    page_width, page_height = 1264, 1680
     
     # 处理每个ZIP文件（每个ZIP是一本书）
     for book_idx, zip_file in enumerate(zip_files, 1):
@@ -318,7 +352,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         
         print(f"  创建PDF: {output_filename}")
         
-        c = canvas.Canvas(output_path, pagesize=A4)
+        c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
 
         # 设置PDF元数据，帮助Kindle识别
         title = Path(zip_file).stem
@@ -340,16 +374,20 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
                 print(f"    警告: 章节 {chapter_name} 没有图片，跳过")
                 continue
             
-            # 为章节添加索引页（标题页）
-            create_title_page(c, chapter_name, page_width, page_height)
-            print(f"    ✓ 章节: {chapter_name} - 添加索引页")
+            print(f"    ✓ 章节: {chapter_name}")
             
             # 添加章节的所有图片
-            for img_name, img_data in chapter_images:
+            # 第一张图片添加章节标题索引
+            first_img_name, first_img_data = chapter_images[0]
+            add_image_to_pdf(c, first_img_data, page_width, page_height, chapter_title=chapter_name)
+            total_images += 1
+            
+            # 后续图片不添加标题
+            for img_name, img_data in chapter_images[1:]:
                 add_image_to_pdf(c, img_data, page_width, page_height)
                 total_images += 1
             
-            print(f"      添加了 {len(chapter_images)} 张图片")
+            print(f"      添加了 {len(chapter_images)} 张图片（第一张带索引）")
         
         # 保存PDF
         c.save()
@@ -409,6 +447,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
     """
     CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
     使用第一张图片作为封面，确保在Kindle上正确显示
+    支持检测CBZ内部的章节结构（文件夹），并为每个章节的第一张图片添加书签索引
     
     参数:
         folder_path: 包含CBZ文件的文件夹路径
@@ -427,7 +466,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
         return
     
     print(f"找到 {len(cbz_files)} 个CBZ文件")
-    print(f"转换模式: CBZ -> PDF (每个CBZ生成一个PDF)")
+    print(f"转换模式: CBZ -> PDF (每个CBZ生成一个PDF，自动检测章节)")
     print(f"输出文件夹: {output_folder}")
     
     success_count = 0
@@ -442,67 +481,137 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
         print(f"\n[{idx}/{len(cbz_files)}] 处理: {cbz_file}")
         
         try:
-            # 从CBZ中提取图片
-            images = get_images_from_zip(cbz_path)
+            # 尝试按章节提取图片（检测文件夹结构）
+            chapters = get_chapters_from_zip(cbz_path)
             
-            if not images:
+            if not chapters:
                 print(f"  ⚠ 警告: {cbz_file} 中没有找到图片，跳过")
                 continue
             
-            print(f"  找到 {len(images)} 张图片")
+            # 检查是否有真正的章节结构（多个文件夹或非"默认章节"）
+            has_chapters = len(chapters) > 1 or (len(chapters) == 1 and "默认章节" not in chapters)
+            
+            if has_chapters:
+                # 对章节名进行排序
+                sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
+                print(f"  检测到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names[:3])}{'...' if len(sorted_chapter_names) > 3 else ''}")
+            else:
+                print(f"  未检测到章节结构，作为单一文档处理")
+            
+            # 统计总图片数
+            total_images = sum(len(imgs) for imgs in chapters.values())
+            print(f"  找到 {total_images} 张图片")
             
             # 获取第一张图片作为封面
-            first_image_data = images[0][1]
+            if has_chapters:
+                first_chapter_name = sorted(chapters.keys(), key=natural_sort_key)[0]
+                first_image_data = chapters[first_chapter_name][0][1]
+            else:
+                first_image_data = list(chapters.values())[0][0][1]
             
             # 使用第一张图片的尺寸作为PDF页面大小（用于封面）
-            # 这样可以确保封面在Kindle上正确显示
             first_img = Image.open(io.BytesIO(first_image_data))
             cover_width, cover_height = first_img.size
             
             # 创建PDF
             c = canvas.Canvas(output_path, pagesize=(cover_width, cover_height))
             
-            # 设置PDF元数据，帮助Kindle识别
+            # 设置PDF元数据
             title = Path(cbz_file).stem
             c.setTitle(title)
             c.setAuthor("Comic Packer")
             c.setSubject("Comic Book")
             
-            # 第一页：使用原始图片尺寸作为封面（重要：Kindle会使用第一页作为封面）
+            # 第一页：封面（添加书签）
+            c.bookmarkPage("封面")
+            c.addOutlineEntry("封面", "封面", level=0)
+            
             print(f"  添加封面 ({cover_width}x{cover_height})")
             img_reader = ImageReader(io.BytesIO(first_image_data))
             c.drawImage(img_reader, 0, 0, width=cover_width, height=cover_height)
             c.showPage()
             
-            # 后续页面：使用A4或保持原始比例
-            page_width, page_height = A4
+            # 后续页面：根据图片宽高比动态调整页面大小
+            page_width, page_height = 1264, 1680
             
-            for img_idx, (img_name, img_data) in enumerate(images[1:], 2):
-                try:
-                    # 打开图片获取尺寸
-                    img = Image.open(io.BytesIO(img_data))
-                    img_width, img_height = img.size
+            if has_chapters:
+                # 有章节结构：为每个章节的第一张图片添加书签
+                sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
+                
+                for chapter_idx, chapter_name in enumerate(sorted_chapter_names, 1):
+                    chapter_images = chapters[chapter_name]
                     
-                    # 计算缩放比例
-                    width_ratio = page_width / img_width
-                    height_ratio = page_height / img_height
-                    scale = min(width_ratio, height_ratio)
-                    
-                    # 计算缩放后的尺寸
-                    scaled_width = img_width * scale
-                    scaled_height = img_height * scale
-                    
-                    # 居中图片
-                    x = (page_width - scaled_width) / 2
-                    y = (page_height - scaled_height) / 2
-                    
-                    # 绘制图片
-                    img_reader = ImageReader(io.BytesIO(img_data))
-                    c.drawImage(img_reader, x, y, width=scaled_width, height=scaled_height)
-                    c.showPage()
-                    
-                except Exception as e:
-                    print(f"  ⚠ 警告: 无法处理图片 {img_name} - {e}")
+                    for img_idx, (img_name, img_data) in enumerate(chapter_images):
+                        # 跳过第一章的第一张图片（已作为封面）
+                        if chapter_idx == 1 and img_idx == 0:
+                            continue
+                        
+                        try:
+                            # 打开图片获取尺寸
+                            img = Image.open(io.BytesIO(img_data))
+                            img_width, img_height = img.size
+                            
+                            # 计算图片的宽高比
+                            img_aspect_ratio = img_width / img_height
+                            page_aspect_ratio = page_width / page_height
+                            
+                            # 根据宽高比调整页面大小
+                            if img_aspect_ratio > page_aspect_ratio:
+                                actual_width = page_width
+                                actual_height = page_width / img_aspect_ratio
+                            else:
+                                actual_height = page_height
+                                actual_width = page_height * img_aspect_ratio
+                            
+                            # 设置当前页面大小
+                            c.setPageSize((actual_width, actual_height))
+                            
+                            # 如果是章节的第一张图片，添加书签（但不在页面上显示文字）
+                            if img_idx == 0:
+                                c.bookmarkPage(chapter_name)
+                                c.addOutlineEntry(chapter_name, chapter_name, level=0)
+                            
+                            # 绘制图片
+                            img_reader = ImageReader(io.BytesIO(img_data))
+                            c.drawImage(img_reader, 0, 0, width=actual_width, height=actual_height)
+                            c.showPage()
+                            
+                        except Exception as e:
+                            print(f"  ⚠ 警告: 无法处理图片 {img_name} - {e}")
+                
+                print(f"  ✓ 已添加 {len(sorted_chapter_names)} 个章节书签")
+            else:
+                # 无章节结构：直接处理所有图片（跳过第一张，已作为封面）
+                all_images = list(chapters.values())[0]
+                
+                for img_name, img_data in all_images[1:]:
+                    try:
+                        # 打开图片获取尺寸
+                        img = Image.open(io.BytesIO(img_data))
+                        img_width, img_height = img.size
+                        
+                        # 计算图片的宽高比
+                        img_aspect_ratio = img_width / img_height
+                        page_aspect_ratio = page_width / page_height
+                        
+                        # 根据宽高比调整页面大小
+                        if img_aspect_ratio > page_aspect_ratio:
+                            actual_width = page_width
+                            actual_height = page_width / img_aspect_ratio
+                        else:
+                            actual_height = page_height
+                            actual_width = page_height * img_aspect_ratio
+                        
+                        # 设置当前页面大小
+                        c.setPageSize((actual_width, actual_height))
+                        
+                        # 绘制图片
+                        img_reader = ImageReader(io.BytesIO(img_data))
+                        c.drawImage(img_reader, 0, 0, width=actual_width, height=actual_height)
+                        c.showPage()
+                        
+                    except Exception as e:
+                        print(f"  ⚠ 警告: 无法处理图片 {img_name} - {e}")
             
             c.save()
             success_count += 1
