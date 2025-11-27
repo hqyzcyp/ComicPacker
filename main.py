@@ -385,6 +385,118 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
 
 
+def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folder: str = './output'):
+    """
+    CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
+    使用第一张图片作为封面，确保在Kindle上正确显示
+    
+    参数:
+        folder_path: 包含CBZ文件的文件夹路径
+        cbz_prefix:  cbz文件名前缀（默认"comic"）
+        output_folder: 输出PDF文件的文件夹路径（默认'./output'）
+    """
+    # 创建输出文件夹（如果不存在）
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # 获取所有CBZ文件（CBZ本质上是ZIP文件）
+    cbz_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.cbz')]
+    cbz_files.sort(key=natural_sort_key)
+    
+    if not cbz_files:
+        print(f"错误: 在 {folder_path} 中没有找到CBZ文件")
+        return
+    
+    print(f"找到 {len(cbz_files)} 个CBZ文件")
+    print(f"转换模式: CBZ -> PDF (每个CBZ生成一个PDF)")
+    print(f"输出文件夹: {output_folder}")
+    
+    success_count = 0
+    
+    for idx, cbz_file in enumerate(cbz_files, 1):
+        cbz_path = os.path.join(folder_path, cbz_file)
+        
+        # 生成PDF文件名（去掉.cbz扩展名，添加.pdf）
+        pdf_filename = f"{cbz_prefix}_{Path(cbz_file).stem}.pdf"
+        output_path = os.path.join(output_folder, pdf_filename)
+        
+        print(f"\n[{idx}/{len(cbz_files)}] 处理: {cbz_file}")
+        
+        try:
+            # 从CBZ中提取图片
+            images = get_images_from_zip(cbz_path)
+            
+            if not images:
+                print(f"  ⚠ 警告: {cbz_file} 中没有找到图片，跳过")
+                continue
+            
+            print(f"  找到 {len(images)} 张图片")
+            
+            # 获取第一张图片作为封面
+            first_image_data = images[0][1]
+            
+            # 使用第一张图片的尺寸作为PDF页面大小（用于封面）
+            # 这样可以确保封面在Kindle上正确显示
+            first_img = Image.open(io.BytesIO(first_image_data))
+            cover_width, cover_height = first_img.size
+            
+            # 创建PDF
+            c = canvas.Canvas(output_path, pagesize=(cover_width, cover_height))
+            
+            # 设置PDF元数据，帮助Kindle识别
+            title = Path(cbz_file).stem
+            c.setTitle(title)
+            c.setAuthor("Comic Packer")
+            c.setSubject("Comic Book")
+            
+            # 第一页：使用原始图片尺寸作为封面（重要：Kindle会使用第一页作为封面）
+            print(f"  添加封面 ({cover_width}x{cover_height})")
+            img_reader = ImageReader(io.BytesIO(first_image_data))
+            c.drawImage(img_reader, 0, 0, width=cover_width, height=cover_height)
+            c.showPage()
+            
+            # 后续页面：使用A4或保持原始比例
+            page_width, page_height = A4
+            
+            for img_idx, (img_name, img_data) in enumerate(images[1:], 2):
+                try:
+                    # 打开图片获取尺寸
+                    img = Image.open(io.BytesIO(img_data))
+                    img_width, img_height = img.size
+                    
+                    # 计算缩放比例
+                    width_ratio = page_width / img_width
+                    height_ratio = page_height / img_height
+                    scale = min(width_ratio, height_ratio)
+                    
+                    # 计算缩放后的尺寸
+                    scaled_width = img_width * scale
+                    scaled_height = img_height * scale
+                    
+                    # 居中图片
+                    x = (page_width - scaled_width) / 2
+                    y = (page_height - scaled_height) / 2
+                    
+                    # 绘制图片
+                    img_reader = ImageReader(io.BytesIO(img_data))
+                    c.drawImage(img_reader, x, y, width=scaled_width, height=scaled_height)
+                    c.showPage()
+                    
+                except Exception as e:
+                    print(f"  ⚠ 警告: 无法处理图片 {img_name} - {e}")
+            
+            c.save()
+            success_count += 1
+            print(f"  ✓ 完成: {pdf_filename}")
+            
+        except Exception as e:
+            print(f"  ✗ 错误: 处理 {cbz_file} 时出错 - {e}")
+    
+    print(f"\n{'='*50}")
+    print(f"✓ 转换完成! 成功: {success_count}/{len(cbz_files)}")
+    print(f"输出目录: {output_folder}")
+
+
+
 if __name__ == "__main__":
     # 创建命令行参数解析器
     parser = argparse.ArgumentParser(
@@ -399,6 +511,8 @@ if __name__ == "__main__":
   python main.py --output ./my_pdfs                 # 指定自定义输出文件夹
   python main.py --mode book                        # 按书打包（检测图片序号重置）
   python main.py --mode book --prefix "我的漫画"     # 按书打包并自定义前缀
+  python main.py --mode cbz --folder ./cbz_files    # CBZ转PDF模式
+  python main.py --mode cbz --folder ./cbz --output ./pdfs  # CBZ转PDF并指定输出目录
         """
     )
     
@@ -433,9 +547,9 @@ if __name__ == "__main__":
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['batch', 'book'],
+        choices=['batch', 'book', 'cbz'],
         default='batch',
-        help='打包模式: batch=固定批次打包, book=按书打包（检测图片序号重置） (默认: batch)'
+        help='打包模式: batch=固定批次打包, book=按书打包（检测图片序号重置）, cbz=CBZ转PDF (默认: batch)'
     )
     
     # 解析命令行参数
@@ -444,5 +558,7 @@ if __name__ == "__main__":
     # 根据模式执行不同的打包逻辑
     if args.mode == 'book':
         pack_comics_by_book(args.folder, args.prefix, args.output)
+    elif args.mode == 'cbz':
+        convert_cbz_to_pdf(args.folder, args.prefix, args.output)
     else:
         pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output)

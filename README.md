@@ -10,6 +10,7 @@
 - ✅ 图片零边距显示，每页一张图片
 - ✅ 自动处理剩余不足批次大小的章节
 - ✅ 支持多种图片格式（JPG, PNG, GIF, BMP, WEBP）
+- ✅ **CBZ转PDF模式**：将CBZ文件转换为PDF，封面可在Kindle上正确显示
 
 ## 安装依赖
 
@@ -19,7 +20,7 @@ pip install -r requirements.txt
 
 ## 使用方法
 
-### 基本使用
+### 基本使用（批次模式）
 
 1. 将所有漫画ZIP文件放在 `comic` 文件夹中
 2. 运行脚本：
@@ -28,12 +29,36 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### CBZ转PDF模式
+
+将CBZ文件转换为PDF，每个CBZ生成一个独立的PDF文件：
+
+```bash
+# 基本用法
+python main.py --mode cbz --folder ./cbz_files
+
+# 指定输出目录
+python main.py --mode cbz --folder ./cbz_files --output ./my_pdfs
+```
+
+**CBZ模式特点：**
+- 每个CBZ文件生成一个独立的PDF
+- 使用第一张图片作为封面
+- 封面使用原始图片尺寸，确保在Kindle上正确显示
+- 自动设置PDF元数据（标题、作者、主题）
+
+### 按书打包模式
+
+当检测到图片序号重置时自动分书：
+
+```bash
+python main.py --mode book --folder ./comics
+```
+
 ### 自定义批次大小
 
-编辑 `main.py` 文件中的 `BATCH_SIZE` 变量：
-
-```python
-BATCH_SIZE = 10  # 修改为你想要的数量
+```bash
+python main.py --batch-size 15  # 每15个章节一个PDF
 ```
 
 或者在代码中直接调用：
@@ -51,15 +76,16 @@ ComicPacker/
 ├── main.py              # 主程序
 ├── requirements.txt     # Python依赖
 ├── README.md           # 说明文档
-└── comic/              # 存放ZIP文件的文件夹
-    ├── 寓言杀手-CH-001.zip
-    ├── 寓言杀手-CH-002.zip
-    └── ...
+├── comic/              # 存放ZIP/CBZ文件的文件夹
+│   ├── 寓言杀手-CH-001.zip
+│   ├── 寓言杀手-CH-002.zip
+│   └── ...
+└── output/             # 输出PDF文件的文件夹（自动创建）
 ```
 
 ## 输出示例
 
-运行后会在 `comic` 文件夹中生成PDF文件：
+运行后会在 `output` 文件夹中生成PDF文件：
 
 ```
 漫画合集_CH-001_to_CH-010.pdf
@@ -71,9 +97,12 @@ ComicPacker/
 - **图片缩放**: 自动调整图片大小以适应A4页面
 - **章节标题**: 每个章节开始前自动添加标题页
 - **零边距**: 图片在页面中居中显示，最大化利用空间
+- **Kindle封面**: CBZ模式下，第一页使用原始图片尺寸作为封面，确保Kindle正确识别
 
 ## 注意事项
 
-- ZIP文件应包含图片文件（支持 JPG, PNG, GIF, BMP, WEBP）
+- ZIP/CBZ文件应包含图片文件（支持 JPG, PNG, GIF, BMP, WEBP）
 - 建议ZIP文件名包含章节编号以便正确排序
-- 生成的PDF使用A4页面大小
+- 批次模式生成的PDF使用A4页面大小
+- **CBZ模式**: 封面页使用原始图片尺寸，内容页使用A4尺寸
+- **Kindle使用**: CBZ模式生成的PDF可直接传输到Kindle，封面会在图书馆中正确显示
