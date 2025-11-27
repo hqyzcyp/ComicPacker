@@ -56,6 +56,42 @@ def get_images_from_zip(zip_path: str) -> List[Tuple[str, bytes]]:
     return images
 
 
+def get_chapters_from_zip(zip_path: str) -> dict:
+    """
+    从ZIP文件中按文件夹（章节）提取图片
+    返回: {章节名: [(文件名, 图片数据), ...], ...}
+    """
+    chapters = {}
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+    
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        # 获取所有图片文件
+        image_files = [f for f in zip_ref.namelist() 
+                      if Path(f).suffix.lower() in image_extensions]
+        
+        for image_file in image_files:
+            # 获取文件夹名作为章节名
+            path_parts = Path(image_file).parts
+            if len(path_parts) > 1:
+                # 有文件夹结构
+                chapter_name = path_parts[0]
+            else:
+                # 没有文件夹，使用默认章节名
+                chapter_name = "默认章节"
+            
+            if chapter_name not in chapters:
+                chapters[chapter_name] = []
+            
+            image_data = zip_ref.read(image_file)
+            chapters[chapter_name].append((image_file, image_data))
+    
+    # 对每个章节的图片进行排序
+    for chapter_name in chapters:
+        chapters[chapter_name].sort(key=lambda x: natural_sort_key(x[0]))
+    
+    return chapters
+
+
 def extract_chapter_name(zip_filename: str) -> str:
     """
     从ZIP文件名中提取章节名称
@@ -221,13 +257,14 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
 
 def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", output_folder: str = './output'):
     """
-    按书打包：当检测到图片名从1开始时，将之前的图片打包成一个PDF
-    使用每本书的第一张图片作为封面
+    按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
+    - 使用最小章节的第一张图片作为整本书的封面
+    - 每个章节开头添加一页带章节名的索引页
     
     参数:
         folder_path: 包含ZIP文件的文件夹路径
         pdf_prefix: PDF文件名前缀（默认"漫画合集"）
-        output_folder: 输出PDF文件的文件夹路径（默认'./output'）
+        output_folder: 输出PDF文件的文件夹路径（默认'./output')
     """
     # 创建输出文件夹（如果不存在）
     os.makedirs(output_folder, exist_ok=True)
@@ -240,104 +277,87 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         return
     
     print(f"找到 {len(zip_files)} 个ZIP文件")
-    print(f"打包模式: 按书打包（检测图片序号重置）")
+    print(f"打包模式: 按书打包（每个ZIP为一本书，包含多个章节）")
     print(f"PDF文件名前缀: {pdf_prefix}")
     print(f"输出文件夹: {output_folder}")
     
     page_width, page_height = A4
     
-    current_book_chapters = []  # 当前书的章节列表
-    current_book_images = []    # 当前书的所有图片
-    first_image_data = None     # 当前书的第一张图片（用作封面）
-    book_count = 0
-    
-    for idx, zip_file in enumerate(zip_files):
+    # 处理每个ZIP文件（每个ZIP是一本书）
+    for book_idx, zip_file in enumerate(zip_files, 1):
         zip_path = os.path.join(folder_path, zip_file)
-        chapter_name = extract_chapter_name(zip_file)
-        images = get_images_from_zip(zip_path)
+        book_name = Path(zip_file).stem  # 去掉.zip后缀
         
-        if not images:
-            print(f"警告: {zip_file} 中没有找到图片，跳过")
+        print(f"\n处理书籍 {book_idx}/{len(zip_files)}: {book_name}")
+        
+        # 从ZIP中提取章节
+        chapters = get_chapters_from_zip(zip_path)
+        
+        if not chapters:
+            print(f"  警告: {zip_file} 中没有找到图片，跳过")
             continue
         
-        # 检查第一张图片是否表示新书的开始
-        first_img_name = images[0][0]
-        is_new_book = is_first_image(first_img_name)
+        # 对章节名进行排序
+        sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
         
-        # 如果检测到新书开始，且已有积累的图片，则打包之前的书
-        if is_new_book and current_book_images:
-            book_count += 1
-            first_chapter = extract_chapter_name(current_book_chapters[0])
-            last_chapter = extract_chapter_name(current_book_chapters[-1])
-            output_filename = f"{pdf_prefix}_Book{book_count}_{first_chapter}_to_{last_chapter}.pdf"
-            output_path = os.path.join(output_folder, output_filename)
-            
-            print(f"\n创建PDF: {output_filename}")
-            print(f"包含章节: {', '.join([extract_chapter_name(z) for z in current_book_chapters])}")
-            
-            c = canvas.Canvas(output_path, pagesize=A4)
-            
-            # 使用第一张图片创建封面
-            book_title = f"Book {book_count}: {first_chapter} - {last_chapter}"
-            if first_image_data:
-                create_image_cover_page(c, book_title, first_image_data, page_width, page_height)
-            else:
-                create_title_page(c, book_title, page_width, page_height)
-            
-            # 添加所有图片
-            for img_data in current_book_images:
-                add_image_to_pdf(c, img_data, page_width, page_height)
-            
-            c.save()
-            print(f"✓ PDF创建完成: {output_filename}")
-            print(f"  共 {len(current_book_images)} 张图片")
-            
-            # 重置当前书的数据
-            current_book_chapters = []
-            current_book_images = []
-            first_image_data = None
+        print(f"  找到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names)}")
         
-        # 添加当前章节到当前书
-        current_book_chapters.append(zip_file)
+        # 获取封面图片（最小章节的第一张图片）
+        first_chapter_name = sorted_chapter_names[0]
+        first_chapter_images = chapters[first_chapter_name]
         
-        # 如果是新书的第一个章节，保存第一张图片作为封面
-        if not first_image_data:
-            first_image_data = images[0][1]
+        if not first_chapter_images:
+            print(f"  警告: 第一章节 {first_chapter_name} 没有图片，跳过此书")
+            continue
         
-        # 添加所有图片到当前书
-        print(f"  添加章节: {chapter_name} ({len(images)} 张图片)")
-        for img_name, img_data in images:
-            current_book_images.append(img_data)
-    
-    # 处理最后一本书
-    if current_book_images:
-        book_count += 1
-        first_chapter = extract_chapter_name(current_book_chapters[0])
-        last_chapter = extract_chapter_name(current_book_chapters[-1])
-        output_filename = f"{pdf_prefix}_Book{book_count}_{first_chapter}_to_{last_chapter}.pdf"
+        cover_image_data = first_chapter_images[0][1]  # 第一张图片的数据
+        
+        # 创建PDF文件
+        output_filename = f"{pdf_prefix}{book_name}.pdf"
         output_path = os.path.join(output_folder, output_filename)
         
-        print(f"\n创建PDF: {output_filename}")
-        print(f"包含章节: {', '.join([extract_chapter_name(z) for z in current_book_chapters])}")
+        print(f"  创建PDF: {output_filename}")
         
         c = canvas.Canvas(output_path, pagesize=A4)
+
+        # 设置PDF元数据，帮助Kindle识别
+        title = Path(zip_file).stem
+        c.setTitle(title)
+        c.setAuthor("Comic Packer")
+        c.setSubject("Comic Book")
         
-        # 使用第一张图片创建封面
-        book_title = f"Book {book_count}: {first_chapter} - {last_chapter}"
-        if first_image_data:
-            create_image_cover_page(c, book_title, first_image_data, page_width, page_height)
-        else:
-            create_title_page(c, book_title, page_width, page_height)
+        # 1. 添加封面（使用第一章节的第一张图片）
+        book_title = book_name
+        create_image_cover_page(c, book_title, cover_image_data, page_width, page_height)
+        print(f"    ✓ 已添加封面")
         
-        # 添加所有图片
-        for img_data in current_book_images:
-            add_image_to_pdf(c, img_data, page_width, page_height)
+        # 2. 处理每个章节
+        total_images = 0
+        for chapter_name in sorted_chapter_names:
+            chapter_images = chapters[chapter_name]
+            
+            if not chapter_images:
+                print(f"    警告: 章节 {chapter_name} 没有图片，跳过")
+                continue
+            
+            # 为章节添加索引页（标题页）
+            create_title_page(c, chapter_name, page_width, page_height)
+            print(f"    ✓ 章节: {chapter_name} - 添加索引页")
+            
+            # 添加章节的所有图片
+            for img_name, img_data in chapter_images:
+                add_image_to_pdf(c, img_data, page_width, page_height)
+                total_images += 1
+            
+            print(f"      添加了 {len(chapter_images)} 张图片")
         
+        # 保存PDF
         c.save()
-        print(f"✓ PDF创建完成: {output_filename}")
-        print(f"  共 {len(current_book_images)} 张图片")
+        print(f"  ✓ PDF创建完成: {output_filename}")
+        print(f"    共 {len(sorted_chapter_names)} 个章节，{total_images} 张图片")
     
-    print(f"\n✓ 全部完成! 共创建 {book_count} 本书的PDF文件")
+    print(f"\n所有书籍打包完成！共处理 {len(zip_files)} 本书")
+
 
 
 def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "漫画合集", output_folder: str = './output'):
