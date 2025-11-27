@@ -26,6 +26,30 @@ def natural_sort_key(filename: str) -> List:
             for text in re.split('([0-9]+)', filename)]
 
 
+def fix_zip_filename(filename: str) -> str:
+    """
+    修复ZIP文件中的中文文件名编码问题
+    ZIP文件可能使用GBK、CP437等编码，需要尝试转换
+    """
+    # 尝试不同的编码方式
+    encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'cp437']
+    
+    for encoding in encodings:
+        try:
+            # 先尝试用cp437解码（ZIP默认），再用目标编码重新编码
+            if encoding != 'utf-8':
+                fixed = filename.encode('cp437').decode(encoding)
+                # 验证解码结果是否包含合理的字符
+                if fixed.isprintable() or any('\u4e00' <= c <= '\u9fff' for c in fixed):
+                    return fixed
+        except (UnicodeDecodeError, UnicodeEncodeError, LookupError):
+            continue
+    
+    # 如果所有编码都失败，返回原始文件名
+    return filename
+
+
+
 def get_sorted_zip_files(folder_path: str) -> List[str]:
     """
     获取文件夹中所有ZIP文件并按自然顺序排序
@@ -44,14 +68,23 @@ def get_images_from_zip(zip_path: str) -> List[Tuple[str, bytes]]:
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
     
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        # 获取所有图片文件并排序
-        image_files = [f for f in zip_ref.namelist() 
-                      if Path(f).suffix.lower() in image_extensions]
-        image_files.sort(key=natural_sort_key)
+        # 获取所有图片文件
+        image_items = []
+        for file_info in zip_ref.filelist:
+            # 修复文件名编码
+            fixed_filename = fix_zip_filename(file_info.filename)
+            
+            # 检查是否是图片文件
+            if Path(fixed_filename).suffix.lower() in image_extensions:
+                image_items.append((fixed_filename, file_info.filename))
         
-        for image_file in image_files:
-            image_data = zip_ref.read(image_file)
-            images.append((image_file, image_data))
+        # 按修复后的文件名排序
+        image_items.sort(key=lambda x: natural_sort_key(x[0]))
+        
+        # 读取图片数据
+        for fixed_filename, original_filename in image_items:
+            image_data = zip_ref.read(original_filename)
+            images.append((fixed_filename, image_data))
     
     return images
 
@@ -66,12 +99,23 @@ def get_chapters_from_zip(zip_path: str) -> dict:
     
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         # 获取所有图片文件
-        image_files = [f for f in zip_ref.namelist() 
-                      if Path(f).suffix.lower() in image_extensions]
-        
-        for image_file in image_files:
+        for file_info in zip_ref.filelist:
+            # 修复文件名编码
+            try:
+                # 尝试使用UTF-8解码
+                filename = file_info.filename
+            except:
+                filename = file_info.filename
+            
+            # 尝试修复编码问题
+            fixed_filename = fix_zip_filename(filename)
+            
+            # 检查是否是图片文件
+            if Path(fixed_filename).suffix.lower() not in image_extensions:
+                continue
+            
             # 获取文件夹名作为章节名
-            path_parts = Path(image_file).parts
+            path_parts = Path(fixed_filename).parts
             if len(path_parts) > 1:
                 # 有文件夹结构
                 chapter_name = path_parts[0]
@@ -82,8 +126,9 @@ def get_chapters_from_zip(zip_path: str) -> dict:
             if chapter_name not in chapters:
                 chapters[chapter_name] = []
             
-            image_data = zip_ref.read(image_file)
-            chapters[chapter_name].append((image_file, image_data))
+            # 读取图片数据（使用原始文件名）
+            image_data = zip_ref.read(file_info.filename)
+            chapters[chapter_name].append((fixed_filename, image_data))
     
     # 对每个章节的图片进行排序
     for chapter_name in chapters:
