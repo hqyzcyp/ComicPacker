@@ -16,6 +16,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 import io
 
+page_width, page_height = 1236, 1648
 
 def natural_sort_key(filename: str) -> List:
     """
@@ -305,8 +306,6 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     """
     output_path = os.path.join(output_folder, output_filename)
     
-    page_width, page_height = 1264, 1680
-    
     c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
     
     print(f"\n创建PDF: {output_filename}")
@@ -360,8 +359,6 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
     print(f"PDF文件名前缀: {pdf_prefix}")
     print(f"输出文件夹: {output_folder}")
     
-    page_width, page_height = 1264, 1680
-    
     # 处理每个ZIP文件（每个ZIP是一本书）
     for book_idx, zip_file in enumerate(zip_files, 1):
         zip_path = os.path.join(folder_path, zip_file)
@@ -382,14 +379,14 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         print(f"  找到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names)}")
         
         # 获取封面图片（最小章节的第一张图片）
-        first_chapter_name = sorted_chapter_names[0]
-        first_chapter_images = chapters[first_chapter_name]
+        # first_chapter_name = sorted_chapter_names[0]
+        # first_chapter_images = chapters[first_chapter_name]
         
-        if not first_chapter_images:
-            print(f"  警告: 第一章节 {first_chapter_name} 没有图片，跳过此书")
-            continue
+        # if not first_chapter_images:
+        #     print(f"  警告: 第一章节 {first_chapter_name} 没有图片，跳过此书")
+        #     continue
         
-        cover_image_data = first_chapter_images[0][1]  # 第一张图片的数据
+        # cover_image_data = first_chapter_images[0][1]  # 第一张图片的数据
         
         # 创建PDF文件
         output_filename = f"{pdf_prefix}{book_name}.pdf"
@@ -407,8 +404,8 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         
         # 1. 添加封面（使用第一章节的第一张图片）
         book_title = book_name
-        create_image_cover_page(c, book_title, cover_image_data, page_width, page_height)
-        print(f"    ✓ 已添加封面")
+        # create_image_cover_page(c, book_title, cover_image_data, page_width, page_height)
+        # print(f"    ✓ 已添加封面")
         
         # 2. 处理每个章节
         total_images = 0
@@ -555,11 +552,11 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
                 first_image_data = list(chapters.values())[0][0][1]
             
             # 使用第一张图片的尺寸作为PDF页面大小（用于封面）
-            first_img = Image.open(io.BytesIO(first_image_data))
-            cover_width, cover_height = first_img.size
+            # first_img = Image.open(io.BytesIO(first_image_data))
+            # cover_width, cover_height = first_img.size
             
             # 创建PDF
-            c = canvas.Canvas(output_path, pagesize=(cover_width, cover_height))
+            c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
             
             # 设置PDF元数据
             title = Path(cbz_file).stem
