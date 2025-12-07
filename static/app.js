@@ -318,6 +318,12 @@ async function startConversion() {
         // Show success notification
         showNotification(`✓ 任务已提交: ${data.job_id.substring(0, 8)}`, 'success');
 
+        // 自动重置文件名前缀和输出目录
+        const prefixInput = document.getElementById('prefix');
+        const outputInput = document.getElementById('output');
+        prefixInput.value = '';
+        outputInput.value = './output';
+
         // Refresh job list to show new job
         loadJobs();
 
@@ -535,10 +541,42 @@ setInterval(() => {
     loadJobs();
 }, 5000);
 
+// Load and update console output
+async function loadConsoleOutput() {
+    try {
+        const response = await fetch('/api/console-output');
+        if (!response.ok) {
+            throw new Error('Failed to load console output');
+        }
+
+        const data = await response.json();
+        const consoleOutput = document.getElementById('console-output');
+
+        if (consoleOutput) {
+            if (data.output && data.output.length > 0) {
+                consoleOutput.innerHTML = data.output
+                    .map(line => `<div class="console-line">${line}</div>`)
+                    .join('');
+            } else {
+                consoleOutput.innerHTML = '<div class="console-line">等待任务输出...</div>';
+            }
+        }
+
+    } catch (error) {
+        console.error('Error loading console output:', error);
+    }
+}
+
 // Auto-refresh system stats every 1 second
 setInterval(() => {
     loadSystemStats();
 }, 1000);
 
-// Load system stats on page load
+// Auto-refresh console output every 1 second
+setInterval(() => {
+    loadConsoleOutput();
+}, 1000);
+
+// Load system stats and console output on page load
 loadSystemStats();
+loadConsoleOutput();

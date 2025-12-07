@@ -9,6 +9,8 @@ import json
 import time
 import threading
 import queue
+import sys
+import io
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
@@ -32,6 +34,36 @@ job_queue = queue.Queue()
 jobs: Dict[str, dict] = {}
 jobs_lock = threading.Lock()
 cancelled_jobs = set()  # 跟踪被取消的任务
+console_output = []  # 存储最新的控制台输出
+console_output_lock = threading.Lock()
+MAX_CONSOLE_LINES = 20  # 最多保留20行输出
+
+
+class ConsoleCapture(io.StringIO):
+    """捕获stdout输出的自定义类"""
+    
+    def write(self, text):
+        """重写write方法以捕获输出"""
+        # 调用父类的write方法
+        super().write(text)
+        
+        # 如果不是空行或只有换行符，添加到控制台输出
+        if text and text.strip():
+            # 移除多余的换行符
+            clean_text = text.rstrip('\n')
+            if clean_text:
+                add_console_output(clean_text)
+        
+        return len(text)
+
+
+def add_console_output(line: str):
+    """添加一行控制台输出"""
+    with console_output_lock:
+        console_output.append(line)
+        # 只保留最新的5行
+        if len(console_output) > MAX_CONSOLE_LINES:
+            console_output.pop(0)
 
 
 class ProgressTracker:
@@ -108,7 +140,14 @@ def worker_thread():
             # 创建进度跟踪器
             tracker = ProgressTracker(job_id)
             
+            # 保存原始stdout
+            original_stdout = sys.stdout
+            
             try:
+                # 重定向stdout到我们的捕获器
+                console_capture = ConsoleCapture()
+                sys.stdout = console_capture
+                
                 # 执行转换任务
                 params = job['parameters']
                 mode = params.get('mode', 'batch')
@@ -189,6 +228,8 @@ def worker_thread():
                         tracker.update('error', 0, 100, f'转换失败: {str(e)}')
             
             finally:
+                # 恢复原始stdout
+                sys.stdout = original_stdout
                 job_queue.task_done()
                 print(f"[WORKER] Job {job_id} processing finished, task_done called")
                 
@@ -376,6 +417,15 @@ def get_system_stats():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/console-output', methods=['GET'])
+def get_console_output():
+    """获取最新的控制台输出"""
+    with console_output_lock:
+        return jsonify({
+            'output': list(console_output)
+        })
 
 
 @app.route('/api/jobs', methods=['GET'])

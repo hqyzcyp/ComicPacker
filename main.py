@@ -1180,4 +1180,19 @@ if __name__ == "__main__":
         for process in conversion_processes:
             process.join()
         print("所有MOBI转换进程已完成")
+        
+        # 如果启用了MOBI转换，删除output文件夹下所有PDF文件
+        if args.convert_to_mobi:
+            print(f"\n清理PDF文件...")
+            pdf_count = 0
+            for filename in os.listdir(args.output):
+                if filename.lower().endswith('.pdf'):
+                    pdf_path = os.path.join(args.output, filename)
+                    try:
+                        os.remove(pdf_path)
+                        pdf_count += 1
+                        print(f"  已删除: {filename}")
+                    except Exception as e:
+                        print(f"  删除失败: {filename} - {e}")
+            print(f"✓ 已清理 {pdf_count} 个PDF文件")
 

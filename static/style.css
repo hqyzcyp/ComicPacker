@@ -588,6 +588,43 @@ header h1 {
     transition: color 0.3s ease;
 }
 
+/* Console Output Panel */
+.console-panel {
+    margin-bottom: 20px;
+}
+
+.console-output {
+    background: var(--bg-primary);
+    border-radius: 8px;
+    padding: 15px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+    color: var(--accent-success);
+    min-height: 120px;
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+}
+
+.console-output::-webkit-scrollbar {
+    width: 6px;
+}
+
+.console-output::-webkit-scrollbar-thumb {
+    background: var(--accent-primary);
+    border-radius: 3px;
+}
+
+.console-line {
+    padding: 3px 0;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.console-line:last-child {
+    color: var(--accent-primary);
+}
+
 .btn-small {
     padding: 8px 16px;
     font-size: 0.9rem;
