@@ -487,7 +487,58 @@ function renderJobList(jobs) {
     }).join('');
 }
 
+// Load and update system stats
+async function loadSystemStats() {
+    try {
+        const response = await fetch('/api/system-stats');
+        if (!response.ok) {
+            throw new Error('Failed to load system stats');
+        }
+
+        const data = await response.json();
+
+        // Update CPU usage
+        const cpuUsage = document.getElementById('cpu-usage');
+        if (cpuUsage) {
+            cpuUsage.textContent = `${data.cpu_percent}%`;
+            // Change color based on usage
+            if (data.cpu_percent > 80) {
+                cpuUsage.style.color = 'var(--accent-error)';
+            } else if (data.cpu_percent > 50) {
+                cpuUsage.style.color = 'var(--accent-warning)';
+            } else {
+                cpuUsage.style.color = 'var(--accent-success)';
+            }
+        }
+
+        // Update memory usage
+        const memoryUsage = document.getElementById('memory-usage');
+        if (memoryUsage) {
+            memoryUsage.textContent = `${data.memory_percent}% (${data.memory_used_gb}/${data.memory_total_gb}GB)`;
+            // Change color based on usage
+            if (data.memory_percent > 80) {
+                memoryUsage.style.color = 'var(--accent-error)';
+            } else if (data.memory_percent > 50) {
+                memoryUsage.style.color = 'var(--accent-warning)';
+            } else {
+                memoryUsage.style.color = 'var(--accent-success)';
+            }
+        }
+
+    } catch (error) {
+        console.error('Error loading system stats:', error);
+    }
+}
+
 // Auto-refresh job list every 5 seconds
 setInterval(() => {
     loadJobs();
 }, 5000);
+
+// Auto-refresh system stats every 1 second
+setInterval(() => {
+    loadSystemStats();
+}, 1000);
+
+// Load system stats on page load
+loadSystemStats();

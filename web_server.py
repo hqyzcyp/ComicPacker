@@ -352,6 +352,32 @@ def detect_mode():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/system-stats', methods=['GET'])
+def get_system_stats():
+    """获取系统资源使用情况"""
+    try:
+        import psutil
+        
+        # 获取CPU使用率（1秒采样）
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        
+        # 获取内存使用情况
+        memory = psutil.virtual_memory()
+        memory_percent = memory.percent
+        memory_used_gb = memory.used / (1024 ** 3)
+        memory_total_gb = memory.total / (1024 ** 3)
+        
+        return jsonify({
+            'cpu_percent': round(cpu_percent, 1),
+            'memory_percent': round(memory_percent, 1),
+            'memory_used_gb': round(memory_used_gb, 2),
+            'memory_total_gb': round(memory_total_gb, 2)
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/jobs', methods=['GET'])
 def get_jobs():
     """获取所有任务"""

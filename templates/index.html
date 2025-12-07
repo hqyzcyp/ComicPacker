@@ -98,6 +98,16 @@
         <div class="panel history-panel">
             <div class="job-history-header">
                 <h2>📜 任务历史</h2>
+                <div class="system-stats" id="system-stats">
+                    <div class="stat-item">
+                        <span class="stat-label">CPU:</span>
+                        <span class="stat-value" id="cpu-usage">--</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">内存:</span>
+                        <span class="stat-value" id="memory-usage">--</span>
+                    </div>
+                </div>
                 <button id="clear-history-btn" class="btn-small">🗑️ 清除历史</button>
             </div>
             <div class="job-list" id="job-list">
