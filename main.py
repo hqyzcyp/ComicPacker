@@ -17,7 +17,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 import io
-from multiprocessing import Process
+from multiprocessing import Process, Pool, cpu_count
 
 page_width, page_height = 1236, 1648
 
@@ -239,6 +239,146 @@ def create_image_cover_page(c: canvas.Canvas, title: str, image_data: bytes, pag
         create_title_page(c, title, page_width, page_height)
 
 
+def preprocess_image(args):
+    """
+    预处理单张图片（在独立进程中执行）
+    
+    参数:
+        args: (img_data, page_width, page_height, img_name)
+    
+    返回:
+        dict: {
+            'data': 优化后的图片字节数据,
+            'width': 实际宽度,
+            'height': 实际高度,
+            'name': 图片名称,
+            'error': 错误信息（如果有）
+        }
+    """
+    img_data, page_width, page_height, img_name = args
+    
+    try:
+        # 解码图片
+        img = Image.open(io.BytesIO(img_data))
+        img_width, img_height = img.size
+        
+        # 计算目标尺寸
+        img_aspect_ratio = img_width / img_height
+        page_aspect_ratio = page_width / page_height
+        
+        if img_aspect_ratio > page_aspect_ratio:
+            actual_width = page_width
+            actual_height = page_width / img_aspect_ratio
+        else:
+            actual_height = page_height
+            actual_width = page_height * img_aspect_ratio
+        
+        # 如果图片过大，调整大小以节省内存
+        max_dimension = max(actual_width, actual_height)
+        if img_width > max_dimension * 1.5 or img_height > max_dimension * 1.5:
+            img = img.resize((int(actual_width), int(actual_height)), Image.LANCZOS)
+        
+        # 保存为优化的 JPEG
+        output = io.BytesIO()
+        if img.mode in ('RGBA', 'LA', 'P'):
+            # 处理透明图片
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        img.save(output, format='JPEG', quality=95, optimize=True)
+        
+        return {
+            'data': output.getvalue(),
+            'width': actual_width,
+            'height': actual_height,
+            'name': img_name,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'data': None,
+            'width': 0,
+            'height': 0,
+            'name': img_name,
+            'error': str(e)
+        }
+
+
+def preprocess_images_parallel(images, page_width, page_height, show_progress=True):
+    """
+    并行预处理多张图片
+    
+    参数:
+        images: [(img_name, img_data), ...] 图片列表
+        page_width: 页面宽度
+        page_height: 页面高度
+        show_progress: 是否显示进度条
+    
+    返回:
+        list: 预处理后的图片数据列表
+    """
+    if not images:
+        return []
+    
+    # 准备参数
+    args_list = [(img_data, page_width, page_height, img_name) 
+                 for img_name, img_data in images]
+    
+    cpu_cores = cpu_count()
+    print(f"  使用 {cpu_cores} 个CPU核心并行预处理 {len(images)} 张图片...")
+    
+    # 并行处理
+    try:
+        # 尝试导入 tqdm 用于进度显示
+        if show_progress:
+            try:
+                from tqdm import tqdm
+                use_tqdm = True
+            except ImportError:
+                use_tqdm = False
+        else:
+            use_tqdm = False
+        
+        with Pool(cpu_cores) as pool:
+            if use_tqdm:
+                results = list(tqdm(
+                    pool.imap(preprocess_image, args_list, chunksize=max(1, len(images) // (cpu_cores * 4))),
+                    total=len(images),
+                    desc="  预处理进度"
+                ))
+            else:
+                results = pool.map(preprocess_image, args_list, chunksize=max(1, len(images) // (cpu_cores * 4)))
+        
+        # 检查错误
+        errors = [r for r in results if r['error']]
+        if errors:
+            print(f"  警告: {len(errors)} 张图片预处理失败")
+            for err in errors[:3]:  # 只显示前3个错误
+                print(f"    - {err['name']}: {err['error']}")
+        
+        # 过滤掉失败的图片
+        successful_results = [r for r in results if r['data'] is not None]
+        print(f"  ✓ 成功预处理 {len(successful_results)}/{len(images)} 张图片")
+        
+        return successful_results
+        
+    except Exception as e:
+        print(f"  ✗ 并行处理失败: {e}")
+        print(f"  回退到单线程处理...")
+        # 回退到单线程处理
+        results = []
+        for args in args_list:
+            result = preprocess_image(args)
+            if result['data'] is not None:
+                results.append(result)
+        return results
+
+
 def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, page_height: float, chapter_title: str = None):
     """
     将图片添加到PDF页面，边距为0，图片填充整个页面
@@ -312,27 +452,66 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     """
     output_path = os.path.join(output_folder, output_filename)
     
-    c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
-    
     print(f"\n创建PDF: {output_filename}")
     print(f"包含章节: {', '.join([extract_chapter_name(z) for z in zip_files])}")
+    
+    # 第一步：收集所有图片和章节信息
+    all_images = []
+    chapter_markers = []  # 记录每个章节的起始位置
     
     for zip_file in zip_files:
         zip_path = os.path.join(folder_path, zip_file)
         chapter_name = extract_chapter_name(zip_file)
         
-        print(f"  处理章节: {chapter_name}")
-        
-        # 添加章节标题页（会自动添加书签）
-        create_title_page(c, chapter_name, page_width, page_height)
+        print(f"  读取章节: {chapter_name}")
         
         # 获取章节中的所有图片
         images = get_images_from_zip(zip_path)
         print(f"    找到 {len(images)} 张图片")
         
-        # 将每张图片添加到PDF
-        for idx, (img_name, img_data) in enumerate(images, 1):
-            add_image_to_pdf(c, img_data, page_width, page_height)
+        # 记录章节标记（在所有图片列表中的位置）
+        chapter_markers.append({
+            'name': chapter_name,
+            'start_index': len(all_images)
+        })
+        
+        all_images.extend(images)
+    
+    # 第二步：并行预处理所有图片
+    if all_images:
+        preprocessed_images = preprocess_images_parallel(all_images, page_width, page_height)
+    else:
+        preprocessed_images = []
+    
+    # 第三步：顺序组装PDF
+    print(f"  组装PDF...")
+    c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
+    
+    current_img_index = 0
+    for chapter_info in chapter_markers:
+        chapter_name = chapter_info['name']
+        
+        # 添加章节标题页
+        create_title_page(c, chapter_name, page_width, page_height)
+        
+        # 计算这个章节有多少张图片
+        next_chapter_start = chapter_markers[chapter_markers.index(chapter_info) + 1]['start_index'] \
+                            if chapter_markers.index(chapter_info) + 1 < len(chapter_markers) \
+                            else len(preprocessed_images)
+        
+        # 添加这个章节的所有图片
+        while current_img_index < next_chapter_start and current_img_index < len(preprocessed_images):
+            img_info = preprocessed_images[current_img_index]
+            
+            # 设置页面大小
+            c.setPageSize((img_info['width'], img_info['height']))
+            
+            # 绘制图片
+            img_reader = ImageReader(io.BytesIO(img_info['data']))
+            c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
+            c.showPage()
+            
+            current_img_index += 1
     
     c.save()
     print(f"✓ PDF创建完成: {output_filename}")
@@ -418,8 +597,10 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         # create_image_cover_page(c, book_title, cover_image_data, page_width, page_height)
         # print(f"    ✓ 已添加封面")
         
-        # 2. 处理每个章节
-        total_images = 0
+        # 2. 收集所有章节的图片
+        all_images = []
+        chapter_info_list = []  # 记录每个章节的信息
+        
         for chapter_name in sorted_chapter_names:
             chapter_images = chapters[chapter_name]
             
@@ -427,20 +608,69 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
                 print(f"    警告: 章节 {chapter_name} 没有图片，跳过")
                 continue
             
-            print(f"    ✓ 章节: {chapter_name}")
+            print(f"    读取章节: {chapter_name} ({len(chapter_images)} 张图片)")
             
-            # 添加章节的所有图片
-            # 第一张图片添加章节标题索引
-            first_img_name, first_img_data = chapter_images[0]
-            add_image_to_pdf(c, first_img_data, page_width, page_height, chapter_title=chapter_name)
-            total_images += 1
+            # 记录章节信息
+            chapter_info_list.append({
+                'name': chapter_name,
+                'start_index': len(all_images),
+                'image_count': len(chapter_images)
+            })
             
-            # 后续图片不添加标题
-            for img_name, img_data in chapter_images[1:]:
-                add_image_to_pdf(c, img_data, page_width, page_height)
+            all_images.extend(chapter_images)
+        
+        # 3. 并行预处理所有图片
+        if all_images:
+            preprocessed_images = preprocess_images_parallel(all_images, page_width, page_height)
+        else:
+            preprocessed_images = []
+        
+        # 4. 顺序组装PDF
+        print(f"  组装PDF...")
+        current_img_index = 0
+        total_images = 0
+        
+        for chapter_info in chapter_info_list:
+            chapter_name = chapter_info['name']
+            
+            # 计算这个章节的图片范围
+            next_chapter_start = chapter_info_list[chapter_info_list.index(chapter_info) + 1]['start_index'] \
+                                if chapter_info_list.index(chapter_info) + 1 < len(chapter_info_list) \
+                                else len(preprocessed_images)
+            
+            # 添加第一张图片（带章节标题书签）
+            if current_img_index < len(preprocessed_images):
+                img_info = preprocessed_images[current_img_index]
+                
+                # 设置页面大小
+                c.setPageSize((img_info['width'], img_info['height']))
+                
+                # 添加书签
+                c.bookmarkPage(chapter_name)
+                c.addOutlineEntry(chapter_name, chapter_name, level=0)
+                
+                # 绘制图片
+                img_reader = ImageReader(io.BytesIO(img_info['data']))
+                c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
+                c.showPage()
+                
+                current_img_index += 1
                 total_images += 1
             
-            print(f"      添加了 {len(chapter_images)} 张图片（第一张带索引）")
+            # 添加后续图片（不带标题）
+            while current_img_index < next_chapter_start and current_img_index < len(preprocessed_images):
+                img_info = preprocessed_images[current_img_index]
+                
+                # 设置页面大小
+                c.setPageSize((img_info['width'], img_info['height']))
+                
+                # 绘制图片
+                img_reader = ImageReader(io.BytesIO(img_info['data']))
+                c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
+                c.showPage()
+                
+                current_img_index += 1
+                total_images += 1
         
         # 保存PDF
         c.save()
@@ -614,9 +844,13 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
             c.drawImage(img_reader, 0, 0, width=cover_width, height=cover_height)
             c.showPage()
             
+            
             if has_chapters:
-                # 有章节结构：为每个章节的第一张图片添加书签
+                # 有章节结构：收集所有图片（跳过第一章的第一张，已作为封面）
                 sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
+                
+                all_images = []
+                chapter_bookmarks = []  # 记录需要添加书签的位置
                 
                 for chapter_idx, chapter_name in enumerate(sorted_chapter_names, 1):
                     chapter_images = chapters[chapter_name]
@@ -626,72 +860,65 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
                         if chapter_idx == 1 and img_idx == 0:
                             continue
                         
-                        try:
-                            # 打开图片获取尺寸
-                            img = Image.open(io.BytesIO(img_data))
-                            img_width, img_height = img.size
-                            
-                            # 计算图片的宽高比
-                            img_aspect_ratio = img_width / img_height
-                            page_aspect_ratio = page_width / page_height
-                            
-                            # 根据宽高比调整页面大小
-                            if img_aspect_ratio > page_aspect_ratio:
-                                actual_width = page_width
-                                actual_height = page_width / img_aspect_ratio
-                            else:
-                                actual_height = page_height
-                                actual_width = page_height * img_aspect_ratio
-                            
-                            # 设置当前页面大小
-                            c.setPageSize((actual_width, actual_height))
-                            
-                            # 如果是章节的第一张图片，添加书签（但不在页面上显示文字）
-                            if img_idx == 0:
-                                c.bookmarkPage(chapter_name)
-                                c.addOutlineEntry(chapter_name, chapter_name, level=0)
-                            
-                            # 绘制图片
-                            img_reader = ImageReader(io.BytesIO(img_data))
-                            c.drawImage(img_reader, 0, 0, width=actual_width, height=actual_height)
-                            c.showPage()
-                            
-                        except Exception as e:
-                            print(f"  ⚠ 警告: 无法处理图片 {img_name} - {e}")
+                        # 如果是章节的第一张图片，记录书签位置
+                        if img_idx == 0:
+                            chapter_bookmarks.append({
+                                'index': len(all_images),
+                                'name': chapter_name
+                            })
+                        
+                        all_images.append((img_name, img_data))
+                
+                # 并行预处理所有图片
+                if all_images:
+                    print(f"  预处理 {len(all_images)} 张图片...")
+                    preprocessed_images = preprocess_images_parallel(all_images, page_width, page_height)
+                else:
+                    preprocessed_images = []
+                
+                # 顺序组装PDF
+                print(f"  组装PDF...")
+                for idx, img_info in enumerate(preprocessed_images):
+                    # 检查是否需要添加书签
+                    for bookmark in chapter_bookmarks:
+                        if bookmark['index'] == idx:
+                            c.bookmarkPage(bookmark['name'])
+                            c.addOutlineEntry(bookmark['name'], bookmark['name'], level=0)
+                            break
+                    
+                    # 设置页面大小
+                    c.setPageSize((img_info['width'], img_info['height']))
+                    
+                    # 绘制图片
+                    img_reader = ImageReader(io.BytesIO(img_info['data']))
+                    c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
+                    c.showPage()
                 
                 print(f"  ✓ 已添加 {len(sorted_chapter_names)} 个章节书签")
             else:
                 # 无章节结构：直接处理所有图片（跳过第一张，已作为封面）
                 all_images = list(chapters.values())[0]
                 
-                for img_name, img_data in all_images[1:]:
-                    try:
-                        # 打开图片获取尺寸
-                        img = Image.open(io.BytesIO(img_data))
-                        img_width, img_height = img.size
-                        
-                        # 计算图片的宽高比
-                        img_aspect_ratio = img_width / img_height
-                        page_aspect_ratio = page_width / page_height
-                        
-                        # 根据宽高比调整页面大小
-                        if img_aspect_ratio > page_aspect_ratio:
-                            actual_width = page_width
-                            actual_height = page_width / img_aspect_ratio
-                        else:
-                            actual_height = page_height
-                            actual_width = page_height * img_aspect_ratio
-                        
-                        # 设置当前页面大小
-                        c.setPageSize((actual_width, actual_height))
-                        
-                        # 绘制图片
-                        img_reader = ImageReader(io.BytesIO(img_data))
-                        c.drawImage(img_reader, 0, 0, width=actual_width, height=actual_height)
-                        c.showPage()
-                        
-                    except Exception as e:
-                        print(f"  ⚠ 警告: 无法处理图片 {img_name} - {e}")
+                # 收集除封面外的所有图片
+                images_to_process = all_images[1:]
+                
+                # 并行预处理
+                if images_to_process:
+                    print(f"  预处理 {len(images_to_process)} 张图片...")
+                    preprocessed_images = preprocess_images_parallel(images_to_process, page_width, page_height)
+                else:
+                    preprocessed_images = []
+                
+                # 顺序组装PDF
+                print(f"  组装PDF...")
+                for img_info in preprocessed_images:
+                    # 设置页面大小
+                    c.setPageSize((img_info['width'], img_info['height']))
+                    
+                    # 绘制图片
+                    img_reader = ImageReader(io.BytesIO(img_info['data']))
+                    c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
+                    c.showPage()
             
             c.save()
             success_count += 1
@@ -866,8 +1093,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--prefix',
         type=str,
-        default='漫画合集',
-        help='PDF文件名前缀 (默认: 漫画合集)'
+        default='',
+        help='PDF文件名前缀 (默认: )'
     )
     
     parser.add_argument(
