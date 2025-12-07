@@ -518,7 +518,7 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     print(f"  已添加 {len(zip_files)} 个章节书签")
 
 
-def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", output_folder: str = './output',
+def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: str = './output',
                         convert_to_mobi: bool = False, kindle_profile: str = 'KPW5'):
     """
     按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
@@ -527,7 +527,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
     
     参数:
         folder_path: 包含ZIP文件的文件夹路径
-        pdf_prefix: PDF文件名前缀（默认"漫画合集"）
+        pdf_prefix: PDF文件名前缀（默认""）
         output_folder: 输出PDF文件的文件夹路径（默认'./output')
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
@@ -690,7 +690,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
 
 
 
-def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "漫画合集", 
+def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "", 
                         output_folder: str = './output', convert_to_mobi: bool = False, 
                         kindle_profile: str = 'KPW5'):
     """
@@ -699,7 +699,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     参数:
         folder_path: 包含ZIP文件的文件夹路径
         batch_size: 每个PDF包含的章节数量(默认10)
-        pdf_prefix: PDF文件名前缀(默认"漫画合集")
+        pdf_prefix: PDF文件名前缀(默认"")
         output_folder: 输出PDF文件的文件夹路径(默认'./output')
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
@@ -751,7 +751,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
 
 
 
-def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folder: str = './output',
+def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: str = './output',
                         convert_to_mobi: bool = False, kindle_profile: str = 'KPW5'):
     """
     CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
@@ -760,7 +760,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
     
     参数:
         folder_path: 包含CBZ文件的文件夹路径
-        cbz_prefix:  cbz文件名前缀（默认"comic"）
+        cbz_prefix:  cbz文件名前缀（默认""）
         output_folder: 输出PDF文件的文件夹路径（默认'./output'）
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
