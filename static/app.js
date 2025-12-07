@@ -209,14 +209,31 @@ function renderFileList(items) {
                         el.classList.remove('selected');
                     });
                     fileItem.classList.add('selected');
-                    selectedFolder = item.path;
-                    selectedFolderDisplay.textContent = item.path;
+                    selectFolder(item.path);
                 }
             }
         });
 
         fileList.appendChild(fileItem);
     });
+}
+
+// Select folder
+function selectFolder(path) {
+    selectedFolder = path;
+    selectedFolderDisplay.textContent = path;
+
+    // 自动设置输出目录为 ./output/文件夹名
+    const folderName = path.split('/').filter(p => p).pop(); // 获取最后一个非空路径部分
+    const outputInput = document.getElementById('output'); // Ensure outputInput is accessible
+    const prefixInput = document.getElementById('prefix');
+
+    // Only update output if prefix is empty
+    if (folderName && !prefixInput.value.trim()) {
+        outputInput.value = `./output/${folderName}`;
+    } else if (!prefixInput.value.trim()) {
+        outputInput.value = './output'; // Fallback if folderName is empty
+    }
 }
 
 // Start conversion
@@ -406,6 +423,9 @@ function updateProgress(job) {
         progressStage.textContent = '⚠️ 已取消';
         progressMessage.textContent = job.error || '任务已被用户取消';
         progressBarInner.style.background = 'linear-gradient(90deg, #f59e0b, #d97706)';
+    } else if (job.status === 'running' || job.status === 'pending') {
+        // 转换中使用默认的蓝紫色渐变
+        progressBarInner.style.background = 'linear-gradient(90deg, var(--accent-primary), var(--accent-secondary))';
     }
 }
 
