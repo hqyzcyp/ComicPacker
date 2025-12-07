@@ -299,12 +299,37 @@ def browse_files():
 
 
 @app.route('/api/jobs', methods=['GET'])
-def list_jobs():
-    """列出所有任务"""
+def get_jobs():
+    """获取所有任务"""
     with jobs_lock:
-        return jsonify({
-            'jobs': list(jobs.values())
-        })
+        # 返回所有任务，按创建时间倒序
+        job_list = sorted(jobs.values(), key=lambda x: x['created_time'], reverse=True)
+        return jsonify({'jobs': job_list})
+
+
+@app.route('/api/jobs/clear', methods=['POST'])
+def clear_jobs():
+    """清除所有已完成、失败和取消的任务"""
+    try:
+        with jobs_lock:
+            # 只保留正在运行和等待中的任务
+            jobs_to_keep = {
+                job_id: job for job_id, job in jobs.items()
+                if job['status'] in ['running', 'pending']
+            }
+            jobs.clear()
+            jobs.update(jobs_to_keep)
+            
+            cleared_count = len(jobs) - len(jobs_to_keep)
+            print(f"[API] Cleared {cleared_count} completed jobs")
+            
+            return jsonify({
+                'success': True,
+                'message': f'已清除 {cleared_count} 条历史记录'
+            })
+    except Exception as e:
+        print(f"[API] Error clearing jobs: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/jobs', methods=['POST'])

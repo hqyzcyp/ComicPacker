@@ -549,6 +549,22 @@ header h1 {
 }
 
 /* Job History */
+.job-history-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.job-history-header h2 {
+    margin: 0;
+}
+
+.btn-small {
+    padding: 8px 16px;
+    font-size: 0.9rem;
+}
+
 .job-list {
     max-height: 300px;
     overflow-y: auto;

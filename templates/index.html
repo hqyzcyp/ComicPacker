@@ -10,10 +10,10 @@
 
 <body>
     <div class="container">
-        <header>
+        <!-- <header>
             <h1>📚 ComicPacker</h1>
             <p class="subtitle">漫画转换工具 Web 界面</p>
-        </header>
+        </header> -->
 
         <div class="main-grid">
             <!-- 左侧：文件浏览器 -->
@@ -111,9 +111,13 @@
             <div class="progress-logs" id="progress-logs"></div>
         </div>
 
+
         <!-- 任务历史 -->
         <div class="panel history-panel">
-            <h2>📜 任务历史</h2>
+            <div class="job-history-header">
+                <h2>📜 任务历史</h2>
+                <button id="clear-history-btn" class="btn-small">🗑️ 清除历史</button>
+            </div>
             <div class="job-list" id="job-list">
                 <div class="empty-state">暂无任务记录</div>
             </div>

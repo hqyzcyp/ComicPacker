@@ -22,6 +22,7 @@ const progressLogs = document.getElementById('progress-logs');
 const jobList = document.getElementById('job-list');
 const startBtn = document.getElementById('start-btn');
 const progressBarInner = document.getElementById('progress-bar');
+const clearHistoryBtn = document.getElementById('clear-history-btn');
 
 // Settings elements
 const setDefaultBtn = document.getElementById('set-default-btn');
@@ -141,6 +142,9 @@ function setupEventListeners() {
             startConversion();
         }
     });
+
+    // Clear history button
+    clearHistoryBtn.addEventListener('click', clearJobHistory);
 }
 
 // Load directory contents
@@ -441,6 +445,29 @@ async function loadJobs() {
         renderJobList(data.jobs);
     } catch (error) {
         console.error('Error loading jobs:', error);
+    }
+}
+
+// Clear job history
+async function clearJobHistory() {
+    if (!confirm('确定要清除所有任务历史记录吗？')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/jobs/clear', {
+            method: 'POST'
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to clear job history');
+        }
+
+        // Reload job list
+        loadJobs();
+    } catch (error) {
+        console.error('Error clearing job history:', error);
+        alert('清除历史记录失败: ' + error.message);
     }
 }
 
