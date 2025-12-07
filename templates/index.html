@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ComicPacker Web Interface</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📚 ComicPacker</h1>
+            <p class="subtitle">漫画转换工具 Web 界面</p>
+        </header>
+
+        <div class="main-grid">
+            <!-- 左侧：文件浏览器 -->
+            <div class="panel file-browser-panel">
+                <h2>📁 文件浏览器</h2>
+
+                <div class="current-path">
+                    <input type="text" id="current-path" readonly>
+                    <button id="parent-btn" title="返回上级目录">⬆️</button>
+                    <button id="refresh-btn" title="刷新">🔄</button>
+                    <button id="set-default-btn" title="设为默认路径">📌</button>
+                </div>
+                <div class="file-list" id="file-list">
+                    <div class="loading">加载中...</div>
+                </div>
+                <div class="selected-folder">
+                    <strong>已选择:</strong>
+                    <span id="selected-folder-display">未选择</span>
+                </div>
+            </div>
+
+            <!-- 右侧：配置和控制 -->
+            <div class="panel config-panel">
+                <h2>⚙️ 转换配置</h2>
+                <form id="conversion-form">
+                    <div class="form-group">
+                        <label for="mode">转换模式:</label>
+                        <select id="mode" name="mode">
+                            <option value="book">按书打包</option>
+                            <option value="cbz">按CBZ打包</option>
+                            <option value="batch">按批次模式</option>
+                        </select>
+                        <small class="help-text">批次模式: 固定章节数打包 | 按书: 自动检测分书 | CBZ: 每个CBZ一个PDF</small>
+                    </div>
+
+                    <div class="form-group" id="batch-size-group" style="display: none;">
+                        <label for="batch-size">批次大小:</label>
+                        <div class="slider-container">
+                            <input type="range" id="batch-size" name="batch_size" min="1" max="50" value="10">
+                            <span id="batch-size-value">10</span> 章节/PDF
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="prefix">文件名前缀:</label>
+                        <input type="text" id="prefix" name="prefix" placeholder="可选，如: 我的漫画">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="output">输出目录:</label>
+                        <input type="text" id="output" name="output" value="./output" placeholder="./output">
+                    </div>
+
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="convert-to-mobi" name="convert_to_mobi" checked>
+                            转换为 MOBI 格式
+                        </label>
+                    </div>
+
+                    <div class="form-group" id="kindle-profile-group">
+                        <label for="kindle-profile">Kindle 设备:</label>
+                        <select id="kindle-profile" name="kindle_profile">
+                            <option value="KPW5" selected>Kindle Paperwhite 5</option>
+                            <option value="KPW">Kindle Paperwhite</option>
+                            <option value="KV">Kindle Voyage</option>
+                            <option value="KO">Kindle Oasis</option>
+                            <option value="K11">Kindle 11th Gen</option>
+                            <option value="KS">Kindle Scribe</option>
+                        </select>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary" id="start-btn">
+                        🚀 开始转换
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- 进度面板 -->
+        <div class="panel progress-panel" id="progress-panel" style="display: none;">
+            <h2>📊 转换进度</h2>
+            <div class="progress-info">
+                <div class="progress-stage" id="progress-stage">准备中...</div>
+                <div class="progress-message" id="progress-message">等待开始</div>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progress-bar">
+                    <span class="progress-text" id="progress-text">0%</span>
+                </div>
+            </div>
+            <div class="progress-logs" id="progress-logs"></div>
+        </div>
+
+        <!-- 任务历史 -->
+        <div class="panel history-panel">
+            <h2>📜 任务历史</h2>
+            <div class="job-list" id="job-list">
+                <div class="empty-state">暂无任务记录</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
