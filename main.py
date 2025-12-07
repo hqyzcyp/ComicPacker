@@ -568,16 +568,6 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         
         print(f"  找到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names)}")
         
-        # 获取封面图片（最小章节的第一张图片）
-        # first_chapter_name = sorted_chapter_names[0]
-        # first_chapter_images = chapters[first_chapter_name]
-        
-        # if not first_chapter_images:
-        #     print(f"  警告: 第一章节 {first_chapter_name} 没有图片，跳过此书")
-        #     continue
-        
-        # cover_image_data = first_chapter_images[0][1]  # 第一张图片的数据
-        
         # 创建PDF文件
         output_filename = f"{pdf_prefix}{book_name}.pdf"
         output_path = os.path.join(output_folder, output_filename)
@@ -591,11 +581,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         c.setTitle(title)
         c.setAuthor("Comic Packer")
         c.setSubject("Comic Book")
-        
-        # 1. 添加封面（使用第一章节的第一张图片）
         book_title = book_name
-        # create_image_cover_page(c, book_title, cover_image_data, page_width, page_height)
-        # print(f"    ✓ 已添加封面")
         
         # 2. 收集所有章节的图片
         all_images = []
