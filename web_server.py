@@ -31,6 +31,7 @@ CORS(app)
 job_queue = queue.Queue()
 jobs: Dict[str, dict] = {}
 jobs_lock = threading.Lock()
+cancelled_jobs = set()  # 跟踪被取消的任务
 
 
 class ProgressTracker:
@@ -42,6 +43,11 @@ class ProgressTracker:
         
     def update(self, stage: str, current: int, total: int, message: str):
         """更新进度"""
+        # 检查任务是否被取消
+        if self.job_id in cancelled_jobs:
+            print(f"[TRACKER] Job {self.job_id} cancellation detected")
+            raise Exception(f"Job {self.job_id} was cancelled by user")
+        
         with jobs_lock:
             if self.job_id in jobs:
                 jobs[self.job_id]['progress'] = {
@@ -74,6 +80,26 @@ def worker_thread():
                     continue
                     
                 job = jobs[job_id]
+                
+                # 检查任务是否已被取消
+                if job_id in cancelled_jobs:
+                    print(f"[WORKER] Job {job_id} was cancelled before starting")
+                    job['status'] = 'cancelled'
+                    job['end_time'] = datetime.now().isoformat()
+                    job['error'] = '任务已取消'
+                    # 更新进度以通知前端
+                    job['progress'] = {
+                        'stage': 'cancelled',
+                        'current': 0,
+                        'total': 100,
+                        'message': '任务在启动前被取消',
+                        'percentage': 0
+                    }
+                    job['last_update'] = datetime.now().isoformat()
+                    cancelled_jobs.discard(job_id)
+                    job_queue.task_done()
+                    continue
+                
                 job['status'] = 'running'
                 job['start_time'] = datetime.now().isoformat()
                 print(f"[WORKER] Job {job_id} status set to running")
@@ -125,21 +151,42 @@ def worker_thread():
                 # 任务完成
                 print(f"[WORKER] Job {job_id} completed successfully")
                 with jobs_lock:
-                    jobs[job_id]['status'] = 'completed'
+                    # main.py已经通过progress_callback调用了completed状态
+                    # 这里只需要确保status被设置（如果main.py没有设置的话）
+                    if jobs[job_id]['status'] != 'completed':
+                        jobs[job_id]['status'] = 'completed'
                     jobs[job_id]['end_time'] = datetime.now().isoformat()
-                    jobs[job_id]['progress']['percentage'] = 100
-                    tracker.update('completed', 100, 100, '转换完成！')
+                    if 'percentage' in jobs[job_id]['progress']:
+                        jobs[job_id]['progress']['percentage'] = 100
                     
             except Exception as e:
-                # 任务失败
-                print(f"[WORKER] Job {job_id} failed with error: {e}")
-                import traceback
-                traceback.print_exc()
-                with jobs_lock:
-                    jobs[job_id]['status'] = 'failed'
-                    jobs[job_id]['end_time'] = datetime.now().isoformat()
-                    jobs[job_id]['error'] = str(e)
-                    tracker.update('error', 0, 100, f'转换失败: {str(e)}')
+                # 检查是否是取消异常
+                if "cancelled" in str(e).lower() or job_id in cancelled_jobs:
+                    print(f"[WORKER] Job {job_id} was cancelled")
+                    with jobs_lock:
+                        jobs[job_id]['status'] = 'cancelled'
+                        jobs[job_id]['end_time'] = datetime.now().isoformat()
+                        jobs[job_id]['error'] = '任务已取消'
+                        # 更新进度以通知前端
+                        jobs[job_id]['progress'] = {
+                            'stage': 'cancelled',
+                            'current': 0,
+                            'total': 100,
+                            'message': '任务已被用户取消',
+                            'percentage': 0
+                        }
+                        jobs[job_id]['last_update'] = datetime.now().isoformat()
+                        cancelled_jobs.discard(job_id)
+                else:
+                    # 任务失败
+                    print(f"[WORKER] Job {job_id} failed with error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    with jobs_lock:
+                        jobs[job_id]['status'] = 'failed'
+                        jobs[job_id]['end_time'] = datetime.now().isoformat()
+                        jobs[job_id]['error'] = str(e)
+                        tracker.update('error', 0, 100, f'转换失败: {str(e)}')
             
             finally:
                 job_queue.task_done()
@@ -163,39 +210,8 @@ def pack_comics_to_pdf_with_progress(folder_path: str, batch_size: int = 10,
                                      convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
                                      progress_callback: Optional[Callable] = None):
     """批次模式转换（带进度回调）"""
-    os.makedirs(output_folder, exist_ok=True)
-    zip_files = get_sorted_zip_files(folder_path)
-    
-    if not zip_files:
-        raise ValueError(f"在 {folder_path} 中没有找到ZIP文件")
-    
-    total_batches = (len(zip_files) + batch_size - 1) // batch_size
-    
-    if progress_callback:
-        progress_callback('scanning', 0, total_batches, f'找到 {len(zip_files)} 个ZIP文件，共 {total_batches} 个批次')
-    
-    for batch_num in range(total_batches):
-        start_idx = batch_num * batch_size
-        end_idx = min(start_idx + batch_size, len(zip_files))
-        batch_files = zip_files[start_idx:end_idx]
-        
-        if progress_callback:
-            progress_callback('processing', batch_num, total_batches, 
-                            f'处理批次 {batch_num + 1}/{total_batches}')
-        
-        # 调用原始函数（这里简化处理，实际应该集成到main.py的函数中）
-        from main import create_pdf_from_chapters, extract_chapter_name
-        
-        first_chapter = extract_chapter_name(batch_files[0])
-        last_chapter = extract_chapter_name(batch_files[-1])
-        output_filename = f"{pdf_prefix}_{first_chapter}_to_{last_chapter}.pdf"
-        
-        create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1, output_folder)
-        
-        if convert_to_mobi:
-            from main import convert_pdf_to_mobi
-            pdf_path = os.path.join(output_folder, output_filename)
-            convert_pdf_to_mobi(pdf_path, output_folder, kindle_profile)
+    pack_comics_to_pdf(folder_path, batch_size, pdf_prefix, output_folder,
+                      convert_to_mobi, kindle_profile, progress_callback)
 
 
 def pack_comics_by_book_with_progress(folder_path: str, pdf_prefix: str = "",
@@ -206,20 +222,9 @@ def pack_comics_by_book_with_progress(folder_path: str, pdf_prefix: str = "",
     """按书打包模式（带进度回调）"""
     print(f"[CONVERT] pack_comics_by_book_with_progress called with folder: {folder_path}")
     
-    # 直接调用原始函数 - 它已经有完整的转换逻辑
-    # 未来可以修改main.py来支持进度回调，现在先让它工作
-    if progress_callback:
-        progress_callback('processing', 0, 100, '开始按书打包转换...')
-    
-    try:
-        # 调用原始的转换函数
-        pack_comics_by_book(folder_path, pdf_prefix, output_folder, convert_to_mobi, kindle_profile)
-        
-        if progress_callback:
-            progress_callback('completed', 100, 100, '按书打包完成')
-    except Exception as e:
-        print(f"[CONVERT] Error in pack_comics_by_book: {e}")
-        raise
+    # 直接调用main.py中的函数，它会通过progress_callback报告所有进度
+    pack_comics_by_book(folder_path, pdf_prefix, output_folder, 
+                       convert_to_mobi, kindle_profile, progress_callback)
 
 
 def convert_cbz_to_pdf_with_progress(folder_path: str, cbz_prefix: str = "",
@@ -228,20 +233,8 @@ def convert_cbz_to_pdf_with_progress(folder_path: str, cbz_prefix: str = "",
                                      kindle_profile: str = 'KPW5',
                                      progress_callback: Optional[Callable] = None):
     """CBZ转PDF模式（带进度回调）"""
-    print(f"[CONVERT] convert_cbz_to_pdf_with_progress called with folder: {folder_path}")
-    
-    if progress_callback:
-        progress_callback('processing', 0, 100, '开始CBZ转PDF...')
-    
-    try:
-        # 调用原始的转换函数
-        convert_cbz_to_pdf(folder_path, cbz_prefix, output_folder, convert_to_mobi, kindle_profile)
-        
-        if progress_callback:
-            progress_callback('completed', 100, 100, 'CBZ转PDF完成')
-    except Exception as e:
-        print(f"[CONVERT] Error in convert_cbz_to_pdf: {e}")
-        raise
+    convert_cbz_to_pdf(folder_path, cbz_prefix, output_folder, 
+                        convert_to_mobi, kindle_profile, progress_callback)
 
 
 # ============= API路由 =============
@@ -380,6 +373,34 @@ def get_job(job_id):
         return jsonify(jobs[job_id])
 
 
+@app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
+def cancel_job(job_id):
+    """取消任务"""
+    try:
+        with jobs_lock:
+            if job_id not in jobs:
+                return jsonify({'error': '任务不存在'}), 404
+            
+            job = jobs[job_id]
+            
+            # 只能取消运行中或等待中的任务
+            if job['status'] not in ['pending', 'running']:
+                return jsonify({'error': f"无法取消状态为 {job['status']} 的任务"}), 400
+            
+            # 标记任务为取消
+            cancelled_jobs.add(job_id)
+            print(f"[API] Job {job_id} marked for cancellation")
+            
+            return jsonify({
+                'success': True,
+                'message': '任务取消请求已发送'
+            })
+            
+    except Exception as e:
+        print(f"[API] Error cancelling job {job_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/progress/<job_id>')
 def progress_stream(job_id):
     """SSE进度流"""
@@ -399,11 +420,11 @@ def progress_stream(job_id):
                 if current_update != last_update:
                     last_update = current_update
                     yield f"data: {json.dumps(job)}\n\n"
-                
-                # 如果任务完成或失败，结束流
-                if job['status'] in ['completed', 'failed']:
-                    time.sleep(1)  # 确保客户端收到最后的更新
-                    break
+                    
+                    # 在发送更新后检查是否为终止状态
+                    if job['status'] in ['completed', 'failed', 'cancelled']:
+                        time.sleep(1)  # 确保客户端收到最后的更新
+                        break
             
             time.sleep(0.5)  # 每0.5秒检查一次
     

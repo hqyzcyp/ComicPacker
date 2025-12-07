@@ -11,7 +11,7 @@ import argparse
 import subprocess
 import shutil
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Callable
 from PIL import Image
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -519,7 +519,8 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
 
 
 def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: str = './output',
-                        convert_to_mobi: bool = False, kindle_profile: str = 'KPW5'):
+                        convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
+                        progress_callback: Optional[Callable] = None):
     """
     按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
     - 使用最小章节的第一张图片作为整本书的封面
@@ -531,6 +532,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         output_folder: 输出PDF文件的文件夹路径（默认'./output')
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
+        progress_callback: 进度回调函数(可选)
     """
     # 创建输出文件夹（如果不存在）
     os.makedirs(output_folder, exist_ok=True)
@@ -549,12 +551,21 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
+    # 报告初始进度
+    if progress_callback:
+        progress_callback('scanning', 0, len(zip_files), f'找到 {len(zip_files)} 本书')
+    
     # 处理每个ZIP文件（每个ZIP是一本书）
     for book_idx, zip_file in enumerate(zip_files, 1):
         zip_path = os.path.join(folder_path, zip_file)
         book_name = Path(zip_file).stem  # 去掉.zip后缀
         
         print(f"\n处理书籍 {book_idx}/{len(zip_files)}: {book_name}")
+        
+        # 报告当前书籍进度
+        if progress_callback:
+            progress_callback('processing', book_idx - 1, len(zip_files), 
+                            f'处理书籍 {book_idx}/{len(zip_files)}: {book_name}')
         
         # 从ZIP中提取章节
         chapters = get_chapters_from_zip(zip_path)
@@ -672,13 +683,18 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     print(f"\n所有书籍打包完成！共处理 {len(zip_files)} 本书")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
+    
+    # 报告完成
+    if progress_callback:
+        progress_callback('completed', len(zip_files), len(zip_files), 
+                         f'所有书籍打包完成！共处理 {len(zip_files)} 本书')
 
 
 
 
 def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "", 
                         output_folder: str = './output', convert_to_mobi: bool = False, 
-                        kindle_profile: str = 'KPW5'):
+                        kindle_profile: str = 'KPW5', progress_callback: Optional[Callable] = None):
     """
     主函数:将文件夹中的ZIP文件按批次打包成PDF
     
@@ -689,6 +705,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         output_folder: 输出PDF文件的文件夹路径(默认'./output')
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
+        progress_callback: 进度回调函数(可选)
     """
     # 创建输出文件夹(如果不存在)
     os.makedirs(output_folder, exist_ok=True)
@@ -710,11 +727,20 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     # 分批处理
     total_batches = (len(zip_files) + batch_size - 1) // batch_size
     
+    # 报告初始进度
+    if progress_callback:
+        progress_callback('scanning', 0, total_batches, f'找到 {len(zip_files)} 个ZIP文件，共 {total_batches} 个批次')
+    
     for batch_num in range(total_batches):
         start_idx = batch_num * batch_size
         end_idx = min(start_idx + batch_size, len(zip_files))
         
         batch_files = zip_files[start_idx:end_idx]
+        
+        # 报告当前批次进度
+        if progress_callback:
+            progress_callback('processing', batch_num, total_batches, 
+                            f'处理批次 {batch_num + 1}/{total_batches}')
         
         # 生成输出文件名
         first_chapter = extract_chapter_name(batch_files[0])
@@ -734,11 +760,17 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
+    
+    # 报告完成
+    if progress_callback:
+        progress_callback('completed', total_batches, total_batches, 
+                         f'全部完成! 共创建 {total_batches} 个PDF文件')
 
 
 
 def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: str = './output',
-                        convert_to_mobi: bool = False, kindle_profile: str = 'KPW5'):
+                        convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
+                        progress_callback: Optional[Callable] = None):
     """
     CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
     使用第一张图片作为封面，确保在Kindle上正确显示
@@ -750,6 +782,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
         output_folder: 输出PDF文件的文件夹路径（默认'./output'）
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
+        progress_callback: 进度回调函数(可选)
     """
     # 创建输出文件夹（如果不存在）
     os.makedirs(output_folder, exist_ok=True)
@@ -768,6 +801,10 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
+    # 报告初始进度
+    if progress_callback:
+        progress_callback('scanning', 0, len(cbz_files), f'找到 {len(cbz_files)} 个CBZ文件')
+    
     success_count = 0
     
     for idx, cbz_file in enumerate(cbz_files, 1):
@@ -778,6 +815,11 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
         output_path = os.path.join(output_folder, pdf_filename)
         
         print(f"\n[{idx}/{len(cbz_files)}] 处理: {cbz_file}")
+        
+        # 报告当前文件进度
+        if progress_callback:
+            progress_callback('processing', idx - 1, len(cbz_files), 
+                            f'处理 {idx}/{len(cbz_files)}: {cbz_file}')
         
         try:
             # 尝试按章节提取图片（检测文件夹结构）
@@ -924,6 +966,11 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     print(f"输出目录: {output_folder}")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
+    
+    # 报告完成
+    if progress_callback:
+        progress_callback('completed', len(cbz_files), len(cbz_files), 
+                         f'转换完成! 成功: {success_count}/{len(cbz_files)}')
 
 
 

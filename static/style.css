@@ -407,6 +407,19 @@ header h1 {
     transform: none;
 }
 
+.btn-primary.processing {
+    opacity: 0.8;
+    cursor: pointer;
+    background: linear-gradient(135deg, var(--accent-warning), #d97706);
+}
+
+.btn-primary.processing:hover {
+    background: linear-gradient(135deg, #ef4444, #dc2626);
+    box-shadow: 0 6px 20px rgba(239, 68, 68, 0.6);
+    transform: translateY(-2px);
+    opacity: 1;
+}
+
 /* Progress Panel */
 .progress-panel {
     animation: slideIn 0.5s ease;
@@ -440,15 +453,32 @@ header h1 {
 }
 
 .progress-bar-container {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.progress-bar-container>.progress-bar {
+    flex: 1;
     background: var(--bg-secondary);
     border-radius: 10px;
     height: 40px;
     overflow: hidden;
-    margin-bottom: 20px;
     border: 1px solid var(--border-color);
+    position: relative;
 }
 
-.progress-bar {
+.progress-count {
+    min-width: 80px;
+    text-align: right;
+    color: var(--accent-primary);
+    font-weight: 600;
+    font-size: 1rem;
+    display: none;
+}
+
+.progress-bar-container>.progress-bar>div {
     height: 100%;
     background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
     width: 0%;
@@ -460,7 +490,7 @@ header h1 {
     overflow: hidden;
 }
 
-.progress-bar::before {
+.progress-bar-container>.progress-bar>div::before {
     content: '';
     position: absolute;
     top: 0;
@@ -544,6 +574,11 @@ header h1 {
     border-left-color: var(--accent-warning);
 }
 
+.job-item.cancelled {
+    border-left-color: var(--accent-warning);
+    opacity: 0.8;
+}
+
 .job-header {
     display: flex;
     justify-content: space-between;
@@ -585,9 +620,57 @@ header h1 {
     color: var(--accent-primary);
 }
 
+.job-status.cancelled {
+    background: rgba(245, 158, 11, 0.2);
+    color: var(--accent-warning);
+}
+
 .job-details {
     font-size: 0.9rem;
     color: var(--text-secondary);
+}
+
+.job-details>div {
+    margin-bottom: 5px;
+}
+
+.job-progress-info {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(99, 102, 241, 0.2);
+}
+
+.job-progress-bar-container {
+    background: var(--bg-primary);
+    border-radius: 4px;
+    height: 6px;
+    overflow: hidden;
+    margin-bottom: 5px;
+}
+
+.job-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+    transition: width 0.3s ease;
+}
+
+.job-progress-text {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: var(--accent-primary);
+    font-weight: 600;
+}
+
+.job-progress-count {
+    color: var(--text-secondary);
+}
+
+.job-progress-message {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-top: 3px;
+    font-style: italic;
 }
 
 .empty-state {
