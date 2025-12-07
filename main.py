@@ -17,7 +17,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 import io
-from multiprocessing import Process, Pool, cpu_count
+from multiprocessing import Process
 
 page_width, page_height = 1236, 1648
 
@@ -309,9 +309,9 @@ def preprocess_image(args):
         }
 
 
-def preprocess_images_parallel(images, page_width, page_height, show_progress=True):
+def preprocess_images(images, page_width, page_height, show_progress=True):
     """
-    并行预处理多张图片
+    顺序预处理多张图片
     
     参数:
         images: [(img_name, img_data), ...] 图片列表
@@ -329,10 +329,9 @@ def preprocess_images_parallel(images, page_width, page_height, show_progress=Tr
     args_list = [(img_data, page_width, page_height, img_name) 
                  for img_name, img_data in images]
     
-    cpu_cores = cpu_count()
-    print(f"  使用 {cpu_cores} 个CPU核心并行预处理 {len(images)} 张图片...")
+    print(f"  预处理 {len(images)} 张图片...")
     
-    # 并行处理
+    # 顺序处理
     try:
         # 尝试导入 tqdm 用于进度显示
         if show_progress:
@@ -344,15 +343,12 @@ def preprocess_images_parallel(images, page_width, page_height, show_progress=Tr
         else:
             use_tqdm = False
         
-        with Pool(cpu_cores) as pool:
-            if use_tqdm:
-                results = list(tqdm(
-                    pool.imap(preprocess_image, args_list, chunksize=max(1, len(images) // (cpu_cores * 4))),
-                    total=len(images),
-                    desc="  预处理进度"
-                ))
-            else:
-                results = pool.map(preprocess_image, args_list, chunksize=max(1, len(images) // (cpu_cores * 4)))
+        results = []
+        iterator = tqdm(args_list, desc="  预处理进度") if use_tqdm else args_list
+        
+        for args in iterator:
+            result = preprocess_image(args)
+            results.append(result)
         
         # 检查错误
         errors = [r for r in results if r['error']]
@@ -368,15 +364,8 @@ def preprocess_images_parallel(images, page_width, page_height, show_progress=Tr
         return successful_results
         
     except Exception as e:
-        print(f"  ✗ 并行处理失败: {e}")
-        print(f"  回退到单线程处理...")
-        # 回退到单线程处理
-        results = []
-        for args in args_list:
-            result = preprocess_image(args)
-            if result['data'] is not None:
-                results.append(result)
-        return results
+        print(f"  ✗ 预处理失败: {e}")
+        return []
 
 
 def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, page_height: float, chapter_title: str = None):
@@ -477,9 +466,9 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
         
         all_images.extend(images)
     
-    # 第二步：并行预处理所有图片
+    # 第二步：预处理所有图片
     if all_images:
-        preprocessed_images = preprocess_images_parallel(all_images, page_width, page_height)
+        preprocessed_images = preprocess_images(all_images, page_width, page_height)
     else:
         preprocessed_images = []
     
@@ -613,9 +602,9 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
             
             all_images.extend(chapter_images)
         
-        # 3. 并行预处理所有图片
+        # 3. 预处理所有图片
         if all_images:
-            preprocessed_images = preprocess_images_parallel(all_images, page_width, page_height)
+            preprocessed_images = preprocess_images(all_images, page_width, page_height)
         else:
             preprocessed_images = []
         
@@ -894,10 +883,10 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
                         
                         all_images.append((img_name, img_data))
                 
-                # 并行预处理所有图片
+                # 预处理所有图片
                 if all_images:
                     print(f"  预处理 {len(all_images)} 张图片...")
-                    preprocessed_images = preprocess_images_parallel(all_images, page_width, page_height)
+                    preprocessed_images = preprocess_images(all_images, page_width, page_height)
                 else:
                     preprocessed_images = []
                 
@@ -927,10 +916,10 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
                 # 收集除封面外的所有图片
                 images_to_process = all_images[1:]
                 
-                # 并行预处理
+                # 预处理所有图片
                 if images_to_process:
                     print(f"  预处理 {len(images_to_process)} 张图片...")
-                    preprocessed_images = preprocess_images_parallel(images_to_process, page_width, page_height)
+                    preprocessed_images = preprocess_images(images_to_process, page_width, page_height)
                 else:
                     preprocessed_images = []
                 
