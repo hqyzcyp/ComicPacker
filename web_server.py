@@ -298,6 +298,60 @@ def browse_files():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/detect-mode', methods=['POST'])
+def detect_mode():
+    """检测文件夹内容并返回推荐的转换模式"""
+    try:
+        data = request.json
+        folder_path = data.get('path')
+        
+        if not folder_path or not os.path.exists(folder_path):
+            return jsonify({'error': '路径不存在'}), 404
+        
+        if not os.path.isdir(folder_path):
+            return jsonify({'error': '不是目录'}), 400
+        
+        # 统计文件类型
+        cbz_count = 0
+        zip_count = 0
+        vol_files_count = 0  # 统计以Vol开头的文件
+        
+        try:
+            for item in os.listdir(folder_path):
+                item_lower = item.lower()
+                
+                # 检查是否以Vol开头
+                if item.startswith('Vol') or item.startswith('vol'):
+                    vol_files_count += 1
+                
+                if item_lower.endswith('.cbz'):
+                    cbz_count += 1
+                elif item_lower.endswith('.zip'):
+                    zip_count += 1
+        except PermissionError:
+            return jsonify({'error': '没有权限访问此目录'}), 403
+        
+        # 根据文件类型推荐模式
+        if cbz_count > 0:
+            recommended_mode = 'cbz'
+        elif zip_count > 0:
+            recommended_mode = 'book'
+        else:
+            recommended_mode = 'book'  # 默认
+        
+        return jsonify({
+            'recommended_mode': recommended_mode,
+            'cbz_count': cbz_count,
+            'zip_count': zip_count,
+            'total_files': cbz_count + zip_count,
+            'has_vol_files': vol_files_count > 0,
+            'vol_files_count': vol_files_count
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/jobs', methods=['GET'])
 def get_jobs():
     """获取所有任务"""

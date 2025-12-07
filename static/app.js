@@ -205,13 +205,13 @@ function renderFileList(items) {
 }
 
 // Select folder
-function selectFolder(path) {
+async function selectFolder(path) {
     selectedFolder = path;
     selectedFolderDisplay.textContent = path;
 
     // 自动设置输出目录为 ./output/文件夹名
     const folderName = path.split('/').filter(p => p).pop(); // 获取最后一个非空路径部分
-    const outputInput = document.getElementById('output'); // Ensure outputInput is accessible
+    const outputInput = document.getElementById('output');
     const prefixInput = document.getElementById('prefix');
 
     // Only update output if prefix is empty
@@ -219,6 +219,52 @@ function selectFolder(path) {
         outputInput.value = `./output/${folderName}`;
     } else if (!prefixInput.value.trim()) {
         outputInput.value = './output'; // Fallback if folderName is empty
+    }
+
+    // 自动检测文件类型并切换模式
+    await detectAndSwitchMode(path);
+}
+
+// Detect folder contents and switch mode automatically
+async function detectAndSwitchMode(folderPath) {
+    try {
+        const response = await fetch('/api/detect-mode', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ path: folderPath })
+        });
+
+        if (!response.ok) {
+            console.error('Failed to detect mode');
+            return;
+        }
+
+        const data = await response.json();
+        const recommendedMode = data.recommended_mode;
+
+        // 切换到推荐的模式
+        modeSelect.value = recommendedMode;
+
+        // 触发 change 事件以更新相关UI
+        const changeEvent = new Event('change');
+        modeSelect.dispatchEvent(changeEvent);
+
+        // 显示通知
+        if (data.cbz_count > 0) {
+            showNotification(`✓ 检测到 ${data.cbz_count} 个CBZ文件，已切换到CBZ模式`, 'info');
+        } else if (data.zip_count > 0) {
+            showNotification(`✓ 检测到 ${data.zip_count} 个ZIP文件，已切换到按书打包模式`, 'info');
+        }
+
+        // 检测到Vol开头的文件时提醒用户填写前缀
+        if (data.has_vol_files) {
+            showNotification(`💡 检测到 ${data.vol_files_count} 个Vol开头的文件，建议填写文件名前缀`, 'warning');
+        }
+
+    } catch (error) {
+        console.error('Error detecting mode:', error);
     }
 }
 
@@ -283,6 +329,11 @@ async function startConversion() {
 
 // Cancel job
 async function cancelJob(jobId) {
+    // 添加二次确认
+    if (!confirm('确定要取消这个任务吗？')) {
+        return;
+    }
+
     try {
         const response = await fetch(`/api/jobs/${jobId}/cancel`, {
             method: 'POST'
