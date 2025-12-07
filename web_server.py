@@ -426,6 +426,34 @@ def cancel_job(job_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/jobs/<job_id>', methods=['DELETE'])
+def delete_job(job_id):
+    """删除任务"""
+    try:
+        with jobs_lock:
+            if job_id not in jobs:
+                return jsonify({'error': '任务不存在'}), 404
+            
+            job = jobs[job_id]
+            
+            # 只能删除已完成、失败或取消的任务
+            if job['status'] in ['pending', 'running']:
+                return jsonify({'error': f"无法删除状态为 {job['status']} 的任务"}), 400
+            
+            # 删除任务
+            del jobs[job_id]
+            print(f"[API] Job {job_id} deleted")
+            
+            return jsonify({
+                'success': True,
+                'message': '任务已删除'
+            })
+            
+    except Exception as e:
+        print(f"[API] Error deleting job {job_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/progress/<job_id>')
 def progress_stream(job_id):
     """SSE进度流"""

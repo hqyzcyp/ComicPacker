@@ -6,22 +6,14 @@ const DEFAULT_PATH_KEY = 'comicpacker_default_path';
 // State management
 let currentPath = '.';
 let selectedFolder = null;
-let currentJobId = null;
-let eventSource = null;
 
 // DOM elements
 const fileList = document.getElementById('file-list');
 const currentPathInput = document.getElementById('current-path');
 const selectedFolderDisplay = document.getElementById('selected-folder-display');
 const conversionForm = document.getElementById('conversion-form');
-const progressPanel = document.getElementById('progress-panel');
-const progressText = document.getElementById('progress-text');
-const progressStage = document.getElementById('progress-stage');
-const progressMessage = document.getElementById('progress-message');
-const progressLogs = document.getElementById('progress-logs');
 const jobList = document.getElementById('job-list');
 const startBtn = document.getElementById('start-btn');
-const progressBarInner = document.getElementById('progress-bar');
 const clearHistoryBtn = document.getElementById('clear-history-btn');
 
 // Settings elements
@@ -130,17 +122,7 @@ function setupEventListeners() {
     // Form submission
     conversionForm.addEventListener('submit', (e) => {
         e.preventDefault();
-
-        // If button is in processing state, cancel the job instead
-        if (startBtn.classList.contains('processing')) {
-            if (currentJobId) {
-                cancelJob(currentJobId);
-            }
-            return; // Prevent any further processing
-        } else {
-            // Otherwise start a new conversion
-            startConversion();
-        }
+        startConversion();
     });
 
     // Clear history button
@@ -251,7 +233,7 @@ async function startConversion() {
     const formData = new FormData(conversionForm);
     const prefix = formData.get('prefix') || '';
 
-    // 任务2: 如果设置了前缀，则输出文件夹使用前缀名称
+    // 如果设置了前缀，则输出文件夹使用前缀名称
     let outputFolder = formData.get('output') || './output';
     if (prefix) {
         outputFolder = `./output/${prefix}`;
@@ -262,7 +244,7 @@ async function startConversion() {
         mode: formData.get('mode'),
         prefix: prefix,
         output: outputFolder,
-        convert_to_mobi: convertToMobiCheckbox.checked,  // 直接读取checkbox的checked属性
+        convert_to_mobi: convertToMobiCheckbox.checked,
         kindle_profile: formData.get('kindle_profile') || 'KPW5'
     };
 
@@ -270,15 +252,6 @@ async function startConversion() {
     if (params.mode === 'batch') {
         params.batch_size = parseInt(formData.get('batch_size'));
     }
-
-    // Set button to processing state (keep it enabled so it can be clicked to cancel)
-    startBtn.textContent = '⏳ 处理中...';
-    startBtn.classList.add('processing');
-    console.log('[DEBUG] Button state set to processing, classList:', startBtn.classList.toString());
-
-    // Add hover effect for cancellation
-    startBtn.addEventListener('mouseenter', showCancelHint);
-    startBtn.addEventListener('mouseleave', hideCancelHint);
 
     try {
         const response = await fetch('/api/jobs', {
@@ -295,46 +268,20 @@ async function startConversion() {
         }
 
         const data = await response.json();
-        currentJobId = data.job_id;
 
-        // Show progress panel
-        progressPanel.style.display = 'block';
-        progressPanel.scrollIntoView({ behavior: 'smooth' });
+        // Show success notification
+        showNotification(`✓ 任务已提交: ${data.job_id.substring(0, 8)}`, 'success');
 
-        // Start listening to progress
-        listenToProgress(currentJobId);
+        // Refresh job list to show new job
+        loadJobs();
 
     } catch (error) {
         console.error('Error starting conversion:', error);
         alert('启动转换失败: ' + error.message);
-        resetStartButton();
     }
 }
 
-// Show cancel hint on hover
-function showCancelHint() {
-    if (startBtn.classList.contains('processing')) {
-        startBtn.textContent = '🛑 停止转换';
-    }
-}
-
-// Hide cancel hint
-function hideCancelHint() {
-    if (startBtn.classList.contains('processing')) {
-        startBtn.textContent = '⏳ 处理中...';
-    }
-}
-
-// Reset start button to initial state
-function resetStartButton() {
-    startBtn.disabled = false;
-    startBtn.textContent = '🚀 开始转换';
-    startBtn.classList.remove('processing');
-    startBtn.removeEventListener('mouseenter', showCancelHint);
-    startBtn.removeEventListener('mouseleave', hideCancelHint);
-}
-
-// Cancel current job
+// Cancel job
 async function cancelJob(jobId) {
     try {
         const response = await fetch(`/api/jobs/${jobId}/cancel`, {
@@ -346,9 +293,10 @@ async function cancelJob(jobId) {
             throw new Error(error.error || 'Failed to cancel job');
         }
 
-        // Update button text to show cancellation in progress
-        startBtn.textContent = '⏳ 取消中...';
-        // Don't disable the button, let SSE event handler reset it when cancellation completes
+        showNotification('✓ 任务取消请求已发送', 'success');
+
+        // Refresh job list
+        setTimeout(() => loadJobs(), 1000);
 
     } catch (error) {
         console.error('Error cancelling job:', error);
@@ -356,82 +304,30 @@ async function cancelJob(jobId) {
     }
 }
 
-// Listen to progress via SSE
-function listenToProgress(jobId) {
-    // Close existing connection
-    if (eventSource) {
-        eventSource.close();
-    }
+// Delete job
+async function deleteJob(jobId) {
+    try {
+        const response = await fetch(`/api/jobs/${jobId}`, {
+            method: 'DELETE'
+        });
 
-    eventSource = new EventSource(`/api/progress/${jobId}`);
-
-    eventSource.onmessage = (event) => {
-        const job = JSON.parse(event.data);
-        updateProgress(job);
-
-        // Close connection if job is completed, failed, or cancelled
-        if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
-            eventSource.close();
-            resetStartButton();
-            loadJobs(); // Refresh job list
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to delete job');
         }
-    };
 
-    eventSource.onerror = (error) => {
-        console.error('SSE error:', error);
-        eventSource.close();
-        resetStartButton();
-    };
-}
+        showNotification('✓ 任务已删除', 'success');
 
-// Update progress display
-function updateProgress(job) {
-    const progress = job.progress;
+        // Refresh job list
+        loadJobs();
 
-    // Update progress bar
-    progressBarInner.style.width = `${progress.percentage}%`;
-
-    // Update progress text - only show percentage on the bar
-    progressText.textContent = `${progress.percentage}%`;
-
-    // Update book count display on the right side
-    const progressCount = document.getElementById('progress-count');
-    if (progress.current !== undefined && progress.total !== undefined && progress.total > 0) {
-        progressCount.textContent = `${progress.current}/${progress.total}`;
-        progressCount.style.display = 'block';
-    } else {
-        progressCount.style.display = 'none';
-    }
-
-    // Update stage and message
-    progressStage.textContent = progress.stage;
-    progressMessage.textContent = progress.message;
-
-    // Update logs
-    if (job.logs && job.logs.length > 0) {
-        progressLogs.innerHTML = job.logs
-            .map(log => `<div class="log-entry">${log}</div>`)
-            .join('');
-        progressLogs.scrollTop = progressLogs.scrollHeight;
-    }
-
-    // Show error if failed
-    if (job.status === 'failed' && job.error) {
-        progressStage.textContent = '❌ 转换失败';
-        progressMessage.textContent = job.error;
-        progressBarInner.style.background = 'linear-gradient(90deg, #ef4444, #dc2626)';
-    } else if (job.status === 'completed') {
-        progressStage.textContent = '✅ 转换完成';
-        progressBarInner.style.background = 'linear-gradient(90deg, #10b981, #059669)';
-    } else if (job.status === 'cancelled') {
-        progressStage.textContent = '⚠️ 已取消';
-        progressMessage.textContent = job.error || '任务已被用户取消';
-        progressBarInner.style.background = 'linear-gradient(90deg, #f59e0b, #d97706)';
-    } else if (job.status === 'running' || job.status === 'pending') {
-        // 转换中使用默认的蓝紫色渐变
-        progressBarInner.style.background = 'linear-gradient(90deg, var(--accent-primary), var(--accent-secondary))';
+    } catch (error) {
+        console.error('Error deleting job:', error);
+        alert('删除任务失败: ' + error.message);
     }
 }
+
+
 
 // Load job history
 async function loadJobs() {
@@ -503,11 +399,18 @@ function renderJobList(jobs) {
             ? `${progress.current}/${progress.total}`
             : '';
 
+        // 确定显示哪个按钮
+        const isActive = job.status === 'pending' || job.status === 'running';
+        const actionButton = isActive
+            ? `<button class="job-action-btn cancel-btn" onclick="cancelJob('${job.id}')">🛑 取消</button>`
+            : `<button class="job-action-btn delete-btn" onclick="deleteJob('${job.id}')">🗑️ 删除</button>`;
+
         return `
             <div class="job-item ${statusClass}">
                 <div class="job-header">
                     <div class="job-id">${job.id.substring(0, 8)}</div>
                     <div class="job-status ${statusClass}">${statusText}</div>
+                    ${actionButton}
                 </div>
                 <div class="job-details">
                     <div><strong>模式:</strong> ${mode}</div>
@@ -533,9 +436,7 @@ function renderJobList(jobs) {
     }).join('');
 }
 
-// Auto-refresh job list every 10 seconds
+// Auto-refresh job list every 5 seconds
 setInterval(() => {
-    if (!currentJobId || (eventSource && eventSource.readyState === EventSource.CLOSED)) {
-        loadJobs();
-    }
-}, 10000);
+    loadJobs();
+}, 5000);
