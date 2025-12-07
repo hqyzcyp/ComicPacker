@@ -17,8 +17,12 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 import io
+from multiprocessing import Process
 
 page_width, page_height = 1236, 1648
+
+# 全局进程池,用于跟踪所有MOBI转换进程
+conversion_processes = []
 
 def natural_sort_key(filename: str) -> List:
     """
@@ -710,10 +714,39 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
 
 
 
+def _run_kcc_conversion(cmd: List[str], pdf_name: str):
+    """
+    在独立进程中执行KCC转换命令
+    
+    参数:
+        cmd: KCC命令列表
+        pdf_name: PDF文件名(用于日志)
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5分钟超时
+        )
+        
+        if result.returncode == 0:
+            print(f"  ✓ MOBI转换完成: {pdf_name}")
+        else:
+            print(f"  ✗ MOBI转换失败: {pdf_name} (退出码: {result.returncode})")
+            if result.stderr:
+                print(f"  错误信息: {result.stderr[:200]}")
+    except subprocess.TimeoutExpired:
+        print(f"  ✗ MOBI转换超时: {pdf_name} (超过5分钟)")
+    except Exception as e:
+        print(f"  ✗ MOBI转换出错: {pdf_name} - {e}")
+
+
 def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None, 
                         device_profile: str = 'KPW5') -> Optional[str]:
     """
     使用KCC (Kindle Comic Converter)将PDF转换为MOBI格式
+    使用多进程方式启动转换,不等待完成
     
     参数:
         pdf_path: PDF文件的路径
@@ -721,7 +754,7 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
         device_profile: KCC设备配置文件(默认:KPW5表示Kindle Paperwhite 5)
     
     返回:
-        生成的MOBI文件路径,如果转换失败则返回None
+        预期的MOBI文件路径,如果无法启动转换则返回None
     """
     # 获取当前脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -758,73 +791,41 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
     pdf_path = os.path.abspath(pdf_path)
     output_folder = os.path.abspath(output_folder)
 
-    try:
-        # 构建KCC命令
-        # -p: 设备配置文件
-        # -f MOBI: 输出格式
-        # -o: 输出目录
-        if use_local_script:
-            # 使用本地Python脚本
-            cmd = [
-                'python3',
-                kcc_script_path,
-                '-p', device_profile,
-                '-f', 'MOBI',
-                '-o', output_folder,
-                pdf_path
-            ]
-        else:
-            # 使用系统命令
-            cmd = [
-                'kcc-c2e',
-                '-p', device_profile,
-                '-f', 'MOBI',
-                '-o', output_folder,
-                pdf_path
-            ]
-        
-        # 执行转换
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5分钟超时
-        )
-        
-        # 检查是否成功
-        if result.returncode == 0:
-            # KCC可能会在文件名后添加设备配置文件名,尝试查找生成的文件
-            possible_paths = [
-                expected_mobi_path,
-                os.path.join(output_folder, f"{pdf_name}_{device_profile}.mobi"),
-                os.path.join(output_folder, f"{pdf_name}-{device_profile}.mobi"),
-            ]
-            
-            for mobi_path in possible_paths:
-                if os.path.exists(mobi_path):
-                    return mobi_path
-            
-            # 如果找不到预期的文件,在输出目录中搜索最新的.mobi文件
-            mobi_files = list(Path(output_folder).glob(f"{pdf_name}*.mobi"))
-            if mobi_files:
-                # 按修改时间排序,返回最新的
-                latest_mobi = max(mobi_files, key=lambda p: p.stat().st_mtime)
-                return str(latest_mobi)
-            
-            print(f"  ⚠ 警告: KCC执行成功但未找到生成的MOBI文件")
-            return None
-        else:
-            print(f"  ✗ KCC转换失败 (退出码: {result.returncode})")
-            if result.stderr:
-                print(f"  错误信息: {result.stderr[:200]}")
-            return None
-            
-    except subprocess.TimeoutExpired:
-        print(f"  ✗ 错误: KCC转换超时(超过5分钟)")
-        return None
-    except Exception as e:
-        print(f"  ✗ 错误: KCC转换时出错 - {e}")
-        return None
+    # 构建KCC命令
+    # -p: 设备配置文件
+    # -f MOBI: 输出格式
+    # -o: 输出目录
+    if use_local_script:
+        # 使用本地Python脚本
+        cmd = [
+            'python3',
+            kcc_script_path,
+            '-p', device_profile,
+            '-f', 'MOBI',
+            '-o', output_folder,
+            pdf_path
+        ]
+    else:
+        # 使用系统命令
+        cmd = [
+            'kcc-c2e',
+            '-p', device_profile,
+            '-f', 'MOBI',
+            '-o', output_folder,
+            pdf_path
+        ]
+    
+    # 启动独立进程执行转换
+    process = Process(target=_run_kcc_conversion, args=(cmd, Path(pdf_path).name))
+    process.start()
+    
+    # 将进程添加到全局进程池
+    conversion_processes.append(process)
+    
+    print(f"  已启动MOBI转换进程: {Path(pdf_path).name}")
+    
+    # 返回预期的MOBI文件路径
+    return expected_mobi_path
 
 
 
@@ -912,4 +913,11 @@ if __name__ == "__main__":
     else:
         pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output,
                           args.convert_to_mobi, args.kindle_profile)
+    
+    # 等待所有MOBI转换进程完成
+    if conversion_processes:
+        print(f"\n等待 {len(conversion_processes)} 个MOBI转换进程完成...")
+        for process in conversion_processes:
+            process.join()
+        print("所有MOBI转换进程已完成")
 
