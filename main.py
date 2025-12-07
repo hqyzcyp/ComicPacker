@@ -8,8 +8,10 @@ import os
 import zipfile
 import re
 import argparse
+import subprocess
+import shutil
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from PIL import Image
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -333,7 +335,8 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     print(f"  已添加 {len(zip_files)} 个章节书签")
 
 
-def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", output_folder: str = './output'):
+def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", output_folder: str = './output',
+                        convert_to_mobi: bool = False, kindle_profile: str = 'KPW5'):
     """
     按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
     - 使用最小章节的第一张图片作为整本书的封面
@@ -343,6 +346,8 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         folder_path: 包含ZIP文件的文件夹路径
         pdf_prefix: PDF文件名前缀（默认"漫画合集"）
         output_folder: 输出PDF文件的文件夹路径（默认'./output')
+        convert_to_mobi: 是否转换为MOBI格式(默认False)
+        kindle_profile: Kindle设备配置文件(默认'KPW5')
     """
     # 创建输出文件夹（如果不存在）
     os.makedirs(output_folder, exist_ok=True)
@@ -358,6 +363,8 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
     print(f"打包模式: 按书打包（每个ZIP为一本书，包含多个章节）")
     print(f"PDF文件名前缀: {pdf_prefix}")
     print(f"输出文件夹: {output_folder}")
+    if convert_to_mobi:
+        print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
     # 处理每个ZIP文件（每个ZIP是一本书）
     for book_idx, zip_file in enumerate(zip_files, 1):
@@ -435,22 +442,35 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "漫画合集", outp
         c.save()
         print(f"  ✓ PDF创建完成: {output_filename}")
         print(f"    共 {len(sorted_chapter_names)} 个章节，{total_images} 张图片")
+        
+        # 如果需要,转换为MOBI
+        if convert_to_mobi:
+            mobi_path = convert_pdf_to_mobi(output_path, output_folder, kindle_profile)
+            if mobi_path:
+                print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
     
     print(f"\n所有书籍打包完成！共处理 {len(zip_files)} 本书")
+    if convert_to_mobi:
+        print(f"  MOBI转换已完成")
 
 
 
-def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "漫画合集", output_folder: str = './output'):
+
+def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "漫画合集", 
+                        output_folder: str = './output', convert_to_mobi: bool = False, 
+                        kindle_profile: str = 'KPW5'):
     """
-    主函数：将文件夹中的ZIP文件按批次打包成PDF
+    主函数:将文件夹中的ZIP文件按批次打包成PDF
     
     参数:
         folder_path: 包含ZIP文件的文件夹路径
-        batch_size: 每个PDF包含的章节数量（默认10）
-        pdf_prefix: PDF文件名前缀（默认"漫画合集"）
-        output_folder: 输出PDF文件的文件夹路径（默认'./output'）
+        batch_size: 每个PDF包含的章节数量(默认10)
+        pdf_prefix: PDF文件名前缀(默认"漫画合集")
+        output_folder: 输出PDF文件的文件夹路径(默认'./output')
+        convert_to_mobi: 是否转换为MOBI格式(默认False)
+        kindle_profile: Kindle设备配置文件(默认'KPW5')
     """
-    # 创建输出文件夹（如果不存在）
+    # 创建输出文件夹(如果不存在)
     os.makedirs(output_folder, exist_ok=True)
     
     # 获取所有ZIP文件并排序
@@ -464,6 +484,8 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     print(f"批次大小: {batch_size} 个章节/PDF")
     print(f"PDF文件名前缀: {pdf_prefix}")
     print(f"输出文件夹: {output_folder}")
+    if convert_to_mobi:
+        print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
     # 分批处理
     total_batches = (len(zip_files) + batch_size - 1) // batch_size
@@ -481,11 +503,22 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         
         # 创建PDF
         create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1, output_folder)
+        
+        # 如果需要,转换为MOBI
+        if convert_to_mobi:
+            pdf_path = os.path.join(output_folder, output_filename)
+            mobi_path = convert_pdf_to_mobi(pdf_path, output_folder, kindle_profile)
+            if mobi_path:
+                print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
     
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
+    if convert_to_mobi:
+        print(f"  MOBI转换已完成")
 
 
-def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folder: str = './output'):
+
+def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folder: str = './output',
+                        convert_to_mobi: bool = False, kindle_profile: str = 'KPW5'):
     """
     CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
     使用第一张图片作为封面，确保在Kindle上正确显示
@@ -495,6 +528,8 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
         folder_path: 包含CBZ文件的文件夹路径
         cbz_prefix:  cbz文件名前缀（默认"comic"）
         output_folder: 输出PDF文件的文件夹路径（默认'./output'）
+        convert_to_mobi: 是否转换为MOBI格式(默认False)
+        kindle_profile: Kindle设备配置文件(默认'KPW5')
     """
     # 创建输出文件夹（如果不存在）
     os.makedirs(output_folder, exist_ok=True)
@@ -510,6 +545,8 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
     print(f"找到 {len(cbz_files)} 个CBZ文件")
     print(f"转换模式: CBZ -> PDF (每个CBZ生成一个PDF，自动检测章节)")
     print(f"输出文件夹: {output_folder}")
+    if convert_to_mobi:
+        print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
     success_count = 0
     
@@ -552,8 +589,8 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
                 first_image_data = list(chapters.values())[0][0][1]
             
             # 使用第一张图片的尺寸作为PDF页面大小（用于封面）
-            # first_img = Image.open(io.BytesIO(first_image_data))
-            # cover_width, cover_height = first_img.size
+            first_img = Image.open(io.BytesIO(first_image_data))
+            cover_width, cover_height = first_img.size
             
             # 创建PDF
             c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
@@ -572,9 +609,6 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
             img_reader = ImageReader(io.BytesIO(first_image_data))
             c.drawImage(img_reader, 0, 0, width=cover_width, height=cover_height)
             c.showPage()
-            
-            # 后续页面：根据图片宽高比动态调整页面大小
-            page_width, page_height = 1264, 1680
             
             if has_chapters:
                 # 有章节结构：为每个章节的第一张图片添加书签
@@ -659,12 +693,139 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "comic", output_folde
             success_count += 1
             print(f"  ✓ 完成: {pdf_filename}")
             
+            # 如果需要,转换为MOBI
+            if convert_to_mobi:
+                mobi_path = convert_pdf_to_mobi(output_path, output_folder, kindle_profile)
+                if mobi_path:
+                    print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+            
         except Exception as e:
             print(f"  ✗ 错误: 处理 {cbz_file} 时出错 - {e}")
     
     print(f"\n{'='*50}")
     print(f"✓ 转换完成! 成功: {success_count}/{len(cbz_files)}")
     print(f"输出目录: {output_folder}")
+    if convert_to_mobi:
+        print(f"  MOBI转换已完成")
+
+
+
+def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None, 
+                        device_profile: str = 'KPW5') -> Optional[str]:
+    """
+    使用KCC (Kindle Comic Converter)将PDF转换为MOBI格式
+    
+    参数:
+        pdf_path: PDF文件的路径
+        output_folder: 可选的输出目录(默认:与PDF相同目录)
+        device_profile: KCC设备配置文件(默认:KPW5表示Kindle Paperwhite 5)
+    
+    返回:
+        生成的MOBI文件路径,如果转换失败则返回None
+    """
+    # 获取当前脚本所在目录
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    kcc_script_path = os.path.join(script_dir, 'kcc', 'kcc-c2e.py')
+    
+    # 检查KCC是否可用(优先使用本地脚本,其次使用系统命令)
+    use_local_script = os.path.exists(kcc_script_path)
+    use_system_command = shutil.which('kcc-c2e') is not None
+    
+    if not use_local_script and not use_system_command:
+        print(f"  ⚠ 警告: 未找到KCC。请先安装或将KCC源码放在项目的kcc目录下")
+        print(f"  本地脚本路径: {kcc_script_path}")
+        print(f"  或安装系统命令: https://github.com/ciromattia/kcc")
+        return None
+    
+    # 检查PDF文件是否存在
+    if not os.path.exists(pdf_path):
+        print(f"  ✗ 错误: PDF文件不存在: {pdf_path}")
+        return None
+    
+    # 确定输出目录
+    if output_folder is None:
+        output_folder = os.path.dirname(pdf_path)
+    
+    # 生成MOBI文件名
+    pdf_name = Path(pdf_path).stem
+    mobi_filename = f"{pdf_name}.mobi"
+    expected_mobi_path = os.path.join(output_folder, mobi_filename)
+    
+    print(f"  正在转换为MOBI: {Path(pdf_path).name}")
+    if use_local_script:
+        print(f"    使用本地KCC脚本")
+    
+    pdf_path = os.path.abspath(pdf_path)
+    output_folder = os.path.abspath(output_folder)
+
+    try:
+        # 构建KCC命令
+        # -p: 设备配置文件
+        # -f MOBI: 输出格式
+        # -o: 输出目录
+        if use_local_script:
+            # 使用本地Python脚本
+            cmd = [
+                'python3',
+                kcc_script_path,
+                '-p', device_profile,
+                '-f', 'MOBI',
+                '-o', output_folder,
+                pdf_path
+            ]
+        else:
+            # 使用系统命令
+            cmd = [
+                'kcc-c2e',
+                '-p', device_profile,
+                '-f', 'MOBI',
+                '-o', output_folder,
+                pdf_path
+            ]
+        
+        # 执行转换
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5分钟超时
+        )
+        
+        # 检查是否成功
+        if result.returncode == 0:
+            # KCC可能会在文件名后添加设备配置文件名,尝试查找生成的文件
+            possible_paths = [
+                expected_mobi_path,
+                os.path.join(output_folder, f"{pdf_name}_{device_profile}.mobi"),
+                os.path.join(output_folder, f"{pdf_name}-{device_profile}.mobi"),
+            ]
+            
+            for mobi_path in possible_paths:
+                if os.path.exists(mobi_path):
+                    return mobi_path
+            
+            # 如果找不到预期的文件,在输出目录中搜索最新的.mobi文件
+            mobi_files = list(Path(output_folder).glob(f"{pdf_name}*.mobi"))
+            if mobi_files:
+                # 按修改时间排序,返回最新的
+                latest_mobi = max(mobi_files, key=lambda p: p.stat().st_mtime)
+                return str(latest_mobi)
+            
+            print(f"  ⚠ 警告: KCC执行成功但未找到生成的MOBI文件")
+            return None
+        else:
+            print(f"  ✗ KCC转换失败 (退出码: {result.returncode})")
+            if result.stderr:
+                print(f"  错误信息: {result.stderr[:200]}")
+            return None
+            
+    except subprocess.TimeoutExpired:
+        print(f"  ✗ 错误: KCC转换超时(超过5分钟)")
+        return None
+    except Exception as e:
+        print(f"  ✗ 错误: KCC转换时出错 - {e}")
+        return None
+
 
 
 
@@ -723,13 +884,32 @@ if __name__ == "__main__":
         help='打包模式: batch=固定批次打包, book=按书打包（检测图片序号重置）, cbz=CBZ转PDF (默认: batch)'
     )
     
+    parser.add_argument(
+        '--convert-to-mobi',
+        action='store_true',
+        help='将生成的PDF文件转换为MOBI格式(需要先安装KCC - Kindle Comic Converter)'
+    )
+    
+    parser.add_argument(
+        '--kindle-profile',
+        type=str,
+        default='KPW5',
+        choices=['K1', 'K2', 'K34', 'K578', 'KDX', 'KPW', 'KPW5', 'KV', 'KO', 'K11', 'KS'],
+        help='Kindle设备配置文件,用于MOBI转换 (默认: KPW5表示Kindle Paperwhite 5)'
+    )
+
+    
     # 解析命令行参数
     args = parser.parse_args()
     
     # 根据模式执行不同的打包逻辑
     if args.mode == 'book':
-        pack_comics_by_book(args.folder, args.prefix, args.output)
+        pack_comics_by_book(args.folder, args.prefix, args.output, 
+                           args.convert_to_mobi, args.kindle_profile)
     elif args.mode == 'cbz':
-        convert_cbz_to_pdf(args.folder, args.prefix, args.output)
+        convert_cbz_to_pdf(args.folder, args.prefix, args.output,
+                          args.convert_to_mobi, args.kindle_profile)
     else:
-        pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output)
+        pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output,
+                          args.convert_to_mobi, args.kindle_profile)
+

@@ -11,6 +11,7 @@
 - ✅ 自动处理剩余不足批次大小的章节
 - ✅ 支持多种图片格式（JPG, PNG, GIF, BMP, WEBP）
 - ✅ **CBZ转PDF模式**：将CBZ文件转换为PDF，封面可在Kindle上正确显示
+- ✅ **可选MOBI转换**：使用KCC将PDF转换为MOBI格式，完美适配Kindle设备
 
 ## 安装依赖
 
@@ -39,7 +40,11 @@ python main.py --mode cbz --folder ./cbz_files
 
 # 指定输出目录
 python main.py --mode cbz --folder ./cbz_files --output ./my_pdfs
+
+# CBZ转PDF并同时转换为MOBI
+python main.py --mode cbz --folder ./cbz_files --convert-to-mobi
 ```
+
 
 **CBZ模式特点：**
 - 每个CBZ文件生成一个独立的PDF
@@ -54,6 +59,57 @@ python main.py --mode cbz --folder ./cbz_files --output ./my_pdfs
 ```bash
 python main.py --mode book --folder ./comics
 ```
+
+### PDF转MOBI模式
+
+将生成的PDF文件转换为MOBI格式（需要先安装KCC）：
+
+```bash
+# 基本用法（转换为MOBI）
+python main.py --convert-to-mobi
+
+# 指定Kindle设备型号
+python main.py --convert-to-mobi --kindle-profile KPW5
+
+# CBZ模式 + MOBI转换
+python main.py --mode cbz --folder ./cbz_files --convert-to-mobi
+
+# 按书打包 + MOBI转换
+python main.py --mode book --convert-to-mobi
+```
+
+**安装KCC (Kindle Comic Converter):**
+
+```bash
+# 方法1: 使用本地KCC脚本(推荐)
+# 将KCC源码克隆到项目目录下
+cd /path/to/ComicPacker
+git clone https://github.com/ciromattia/kcc.git
+cd kcc
+pip install -r requirements.txt
+
+# 方法2: Ubuntu/Debian(使用Flatpak)
+sudo apt install flatpak
+flatpak install flathub io.github.ciromattia.kcc
+
+# 方法3: 从源码安装到系统
+git clone https://github.com/ciromattia/kcc.git
+cd kcc
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+> **注意**: 程序会优先使用项目目录下的 `kcc/kcc-c2e.py` 脚本,如果不存在则尝试使用系统安装的 `kcc-c2e` 命令。
+
+**支持的Kindle设备配置:**
+- `KPW6`: Kindle Paperwhite 6(默认,推荐)
+- `KPW5`: Kindle Paperwhite 5
+- `KPW`: Kindle Paperwhite (旧版)
+- `KV`: Kindle Voyage
+- `KO`: Kindle Oasis
+- `K11`: Kindle 11th Gen
+- `KS`: Kindle Scribe
 
 ### 自定义批次大小
 

@@ -1,2 +1,5 @@
 Pillow>=10.0.0
 reportlab>=4.0.0
+
+# 可选依赖: KCC (Kindle Comic Converter) 用于PDF转MOBI
+# 需要单独安装: https://github.com/ciromattia/kcc
