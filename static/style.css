@@ -560,6 +560,34 @@ header h1 {
     margin: 0;
 }
 
+.system-stats {
+    display: flex;
+    gap: 20px;
+    padding: 8px 16px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.stat-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.stat-label {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.stat-value {
+    font-size: 0.9rem;
+    font-weight: 600;
+    font-family: 'Courier New', monospace;
+    transition: color 0.3s ease;
+}
+
 .btn-small {
     padding: 8px 16px;
     font-size: 0.9rem;
