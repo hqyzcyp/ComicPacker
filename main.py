@@ -491,9 +491,6 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     for chapter_info in chapter_markers:
         chapter_name = chapter_info['name']
         
-        # 添加章节标题页
-        create_title_page(c, chapter_name, page_width, page_height)
-        
         # 计算这个章节有多少张图片
         next_chapter_start = chapter_markers[chapter_markers.index(chapter_info) + 1]['start_index'] \
                             if chapter_markers.index(chapter_info) + 1 < len(chapter_markers) \
