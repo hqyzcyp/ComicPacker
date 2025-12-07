@@ -971,19 +971,32 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
 
 
 
-def _run_kcc_conversion(cmd: List[str], pdf_name: str):
+def _run_kcc_conversion(cmd: List[str], pdf_name: str, project_dir: str = None):
     """
-    在独立进程中执行KCC转换命令
+    在独立进程中运行KCC转换命令
     
     参数:
         cmd: KCC命令列表
         pdf_name: PDF文件名(用于日志)
+        project_dir: 项目根目录路径(用于设置PYTHONPATH)
     """
     try:
+        # 设置环境变量，确保 KCC 脚本能找到模块
+        env = os.environ.copy()
+        if project_dir:
+            # 添加项目根目录到 PYTHONPATH
+            pythonpath = env.get('PYTHONPATH', '')
+            if pythonpath:
+                env['PYTHONPATH'] = f"{project_dir}:{pythonpath}" # Prepend project_dir
+            else:
+                env['PYTHONPATH'] = project_dir
+        
+        # 执行转换命令
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            env=env,  # 使用修改后的环境变量
             timeout=300  # 5分钟超时
         )
         
@@ -1073,7 +1086,8 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
         ]
     
     # 启动独立进程执行转换
-    process = Process(target=_run_kcc_conversion, args=(cmd, Path(pdf_path).name))
+    # 传递项目根目录作为 PYTHONPATH
+    process = Process(target=_run_kcc_conversion, args=(cmd, Path(pdf_path).name, script_dir))
     process.start()
     
     # 将进程添加到全局进程池

@@ -185,3 +185,36 @@ ComicPacker/
 - 批次模式生成的PDF使用A4页面大小
 - **CBZ模式**: 封面页使用原始图片尺寸，内容页使用A4尺寸
 - **Kindle使用**: CBZ模式生成的PDF可直接传输到Kindle，封面会在图书馆中正确显示
+
+
+
+```
+/etc/systemd/system/c2m.service
+
+[Unit]
+Description=c2m service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/vol1/1000/code/ComicPacker
+ExecStart=/vol1/1000/code/ComicPacker/start_web.sh
+StandardOutput=append:/var/log/c2m/c2m.log
+StandardError=append:/var/log/c2m/c2m.err
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+sudo systemctl daemon-reload
+sudo systemctl enable c2m.service
+sudo systemctl restart c2m.service
+sudo mkdir -p /var/log/c2m
+sudo touch /var/log/c2m/c2m.log /var/log/c2m/c2m.err
+sudo chmod 644 /var/log/c2m/c2m.log /var/log/c2m/c2m.err
+

@@ -9,7 +9,8 @@ echo ""
 # 检查虚拟环境
 if [ -d ".venv" ]; then
     echo "✓ 找到虚拟环境"
-    PYTHON=".venv/bin/python"
+    source .venv/bin/activate
+    PYTHON="python"
 else
     echo "⚠ 未找到虚拟环境，使用系统Python"
     PYTHON="python3"
@@ -30,6 +31,9 @@ echo "启动Web服务器..."
 echo "访问地址: http://localhost:5000"
 echo "按 Ctrl+C 停止服务器"
 echo ""
+
+# 设置 PYTHONPATH 以确保 KCC 脚本能找到模块
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 
 # 启动服务器
 $PYTHON web_server.py
