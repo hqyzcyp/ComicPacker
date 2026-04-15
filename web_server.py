@@ -11,6 +11,7 @@ import threading
 import queue
 import sys
 import io
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
@@ -37,6 +38,20 @@ cancelled_jobs = set()  # 跟踪被取消的任务
 console_output = []  # 存储最新的控制台输出
 console_output_lock = threading.Lock()
 MAX_CONSOLE_LINES = 20  # 最多保留20行输出
+
+
+def configure_server_logging():
+    """抑制 Flask/Werkzeug 的常规访问日志，只保留关键任务日志。"""
+    werkzeug_logger = logging.getLogger('werkzeug')
+    werkzeug_logger.setLevel(logging.ERROR)
+    werkzeug_logger.propagate = False
+
+    # 隐藏 Flask 自带开发服务器 banner/debug 提示，终端只保留关键业务日志。
+    try:
+        import flask.cli
+        flask.cli.show_server_banner = lambda *args, **kwargs: None
+    except Exception:
+        pass
 
 
 class ConsoleCapture(io.StringIO):
@@ -102,9 +117,7 @@ def worker_thread():
     print("[WORKER] Worker thread started")
     while True:
         try:
-            print("[WORKER] Waiting for job from queue...")
             job_id = job_queue.get()
-            print(f"[WORKER] Got job from queue: {job_id}")
             
             with jobs_lock:
                 if job_id not in jobs:
@@ -134,8 +147,7 @@ def worker_thread():
                 
                 job['status'] = 'running'
                 job['start_time'] = datetime.now().isoformat()
-                print(f"[WORKER] Job {job_id} status set to running")
-                print(f"[WORKER] Job parameters: {job['parameters']}")
+                print(f"[WORKER] Job {job_id} started ({job['parameters'].get('mode', 'batch')})")
             
             # 创建进度跟踪器
             tracker = ProgressTracker(job_id)
@@ -156,7 +168,6 @@ def worker_thread():
                 tracker.update('init', 0, 100, f'开始 {mode} 模式转换...')
                 
                 if mode == 'batch':
-                    print("[WORKER] Calling pack_comics_to_pdf_with_progress")
                     pack_comics_to_pdf_with_progress(
                         folder_path=params['folder'],
                         batch_size=params.get('batch_size', 10),
@@ -167,7 +178,6 @@ def worker_thread():
                         progress_callback=tracker.update
                     )
                 elif mode == 'book':
-                    print("[WORKER] Calling pack_comics_by_book_with_progress")
                     pack_comics_by_book_with_progress(
                         folder_path=params['folder'],
                         pdf_prefix=params.get('prefix', ''),
@@ -177,7 +187,6 @@ def worker_thread():
                         progress_callback=tracker.update
                     )
                 elif mode == 'cbz':
-                    print("[WORKER] Calling convert_cbz_to_pdf_with_progress")
                     convert_cbz_to_pdf_with_progress(
                         folder_path=params['folder'],
                         cbz_prefix=params.get('prefix', ''),
@@ -231,7 +240,6 @@ def worker_thread():
                 # 恢复原始stdout
                 sys.stdout = original_stdout
                 job_queue.task_done()
-                print(f"[WORKER] Job {job_id} processing finished, task_done called")
                 
         except Exception as e:
             print(f"[WORKER] Worker thread error: {e}")
@@ -261,8 +269,6 @@ def pack_comics_by_book_with_progress(folder_path: str, pdf_prefix: str = "",
                                       kindle_profile: str = 'KPW5',
                                       progress_callback: Optional[Callable] = None):
     """按书打包模式（带进度回调）"""
-    print(f"[CONVERT] pack_comics_by_book_with_progress called with folder: {folder_path}")
-    
     # 直接调用main.py中的函数，它会通过progress_callback报告所有进度
     pack_comics_by_book(folder_path, pdf_prefix, output_folder, 
                        convert_to_mobi, kindle_profile, progress_callback)
@@ -467,20 +473,18 @@ def create_job():
     """创建新的转换任务"""
     try:
         params = request.json
-        print(f"[DEBUG] 收到转换请求: {params}")  # 调试日志
         
         # 验证参数
         if 'folder' not in params:
-            print("[DEBUG] 错误: 缺少folder参数")
+            print("[API] 创建任务失败: 缺少 folder 参数")
             return jsonify({'error': '缺少folder参数'}), 400
         
         if not os.path.exists(params['folder']):
-            print(f"[DEBUG] 错误: 文件夹不存在 - {params['folder']}")
+            print(f"[API] 创建任务失败: 文件夹不存在 - {params['folder']}")
             return jsonify({'error': '文件夹不存在'}), 400
         
         # 创建任务
         job_id = str(uuid.uuid4())
-        print(f"[DEBUG] 创建任务 ID: {job_id}")
         
         job = {
             'id': job_id,
@@ -505,7 +509,7 @@ def create_job():
         
         # 添加到队列
         job_queue.put(job_id)
-        print(f"[DEBUG] 任务已添加到队列，当前队列大小: {job_queue.qsize()}")
+        print(f"[JOB] Created job {job_id} ({params.get('mode', 'batch')})")
         
         return jsonify({
             'job_id': job_id,
@@ -513,7 +517,7 @@ def create_job():
         })
         
     except Exception as e:
-        print(f"[DEBUG] 创建任务时出错: {e}")
+        print(f"[API] 创建任务时出错: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -615,6 +619,7 @@ def progress_stream(job_id):
 
 
 if __name__ == '__main__':
+    configure_server_logging()
     print("=" * 60)
     print("ComicPacker Web Server")
     print("=" * 60)
@@ -622,4 +627,4 @@ if __name__ == '__main__':
     print("按 Ctrl+C 停止服务器")
     print("=" * 60)
     
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=True)
