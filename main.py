@@ -23,6 +23,7 @@ page_width, page_height = 1236, 1648
 
 # 全局进程池,用于跟踪所有MOBI转换进程
 conversion_processes = []
+INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
 
 def natural_sort_key(filename: str) -> List:
     """
@@ -54,6 +55,44 @@ def fix_zip_filename(filename: str) -> str:
     
     # 如果所有编码都失败，返回原始文件名
     return filename
+
+
+def sanitize_output_component(value: str) -> str:
+    """
+    清理输出文件/目录名中的非法字符并压缩空白。
+    """
+    cleaned = re.sub(INVALID_FILENAME_CHARS, ' ', value or '')
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' ._-')
+    return cleaned
+
+
+def extract_volume_number(name: str) -> Optional[str]:
+    """
+    从名称中提取卷号数字，统一补齐为至少 2 位。
+    例如: "Vol.1" -> "01", "尖帽子的魔法工坊 Vol.12" -> "12"
+    """
+    match = re.search(r'(?i)\bvol(?:ume)?[.\s_-]*(\d+)\b', name or '')
+    if not match:
+        return None
+
+    digits = match.group(1)
+    return digits.zfill(max(2, len(digits)))
+
+
+def build_normalized_volume_name(source_name: str, comic_name: str = "") -> str:
+    """
+    根据漫画名与源文件卷号生成规范输出名，格式为: 漫画名 Vol.xx
+    若无法识别卷号，则回退为源文件名（去扩展名）。
+    """
+    stem = Path(source_name).stem
+    safe_stem = sanitize_output_component(stem) or stem
+    safe_title = sanitize_output_component(comic_name)
+    volume_number = extract_volume_number(stem)
+
+    if safe_title and volume_number:
+        return f"{safe_title} Vol.{volume_number}"
+
+    return safe_stem
 
 
 
@@ -506,7 +545,8 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
 
 def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: str = './output',
                         convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
-                        progress_callback: Optional[Callable] = None):
+                        progress_callback: Optional[Callable] = None,
+                        comic_name: str = ""):
     """
     按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
     - 使用最小章节的第一张图片作为整本书的封面
@@ -533,6 +573,8 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     print(f"找到 {len(zip_files)} 个ZIP文件")
     print(f"打包模式: 按书打包（每个ZIP为一本书，包含多个章节）")
     print(f"PDF文件名前缀: {pdf_prefix}")
+    if comic_name:
+        print(f"规范漫画名: {comic_name}")
     print(f"输出文件夹: {output_folder}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
@@ -566,7 +608,8 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         print(f"  找到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names)}")
         
         # 创建PDF文件
-        output_filename = f"{pdf_prefix}{book_name}.pdf"
+        normalized_book_name = build_normalized_volume_name(zip_file, comic_name) if comic_name else book_name
+        output_filename = f"{normalized_book_name}.pdf" if comic_name else f"{pdf_prefix}{book_name}.pdf"
         output_path = os.path.join(output_folder, output_filename)
         
         print(f"  创建PDF: {output_filename}")
@@ -574,11 +617,11 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
 
         # 设置PDF元数据，帮助Kindle识别
-        title = Path(zip_file).stem
+        title = normalized_book_name if comic_name else Path(zip_file).stem
         c.setTitle(title)
         c.setAuthor("Comic Packer")
         c.setSubject("Comic Book")
-        book_title = book_name
+        book_title = normalized_book_name if comic_name else book_name
         
         # 2. 收集所有章节的图片
         all_images = []
@@ -731,7 +774,8 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         # 生成输出文件名
         first_chapter = extract_chapter_name(batch_files[0])
         last_chapter = extract_chapter_name(batch_files[-1])
-        output_filename = f"{pdf_prefix}_{first_chapter}_to_{last_chapter}.pdf"
+        prefix_part = f"{pdf_prefix}_" if pdf_prefix else ""
+        output_filename = f"{prefix_part}{first_chapter}_to_{last_chapter}.pdf"
         
         # 创建PDF
         create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1, output_folder)
@@ -756,7 +800,8 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
 
 def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: str = './output',
                         convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
-                        progress_callback: Optional[Callable] = None):
+                        progress_callback: Optional[Callable] = None,
+                        comic_name: str = ""):
     """
     CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
     使用第一张图片作为封面，确保在Kindle上正确显示
@@ -783,6 +828,8 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     
     print(f"找到 {len(cbz_files)} 个CBZ文件")
     print(f"转换模式: CBZ -> PDF (每个CBZ生成一个PDF，自动检测章节)")
+    if comic_name:
+        print(f"规范漫画名: {comic_name}")
     print(f"输出文件夹: {output_folder}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
@@ -796,8 +843,10 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     for idx, cbz_file in enumerate(cbz_files, 1):
         cbz_path = os.path.join(folder_path, cbz_file)
         
-        # 生成PDF文件名（去掉.cbz扩展名，添加.pdf）
-        pdf_filename = f"{cbz_prefix}_{Path(cbz_file).stem}.pdf"
+        # 生成PDF文件名（优先使用规范化的 漫画名 Vol.xx 命名）
+        normalized_cbz_name = build_normalized_volume_name(cbz_file, comic_name) if comic_name else Path(cbz_file).stem
+        prefix_part = f"{cbz_prefix}_" if cbz_prefix else ""
+        pdf_filename = f"{normalized_cbz_name}.pdf" if comic_name else f"{prefix_part}{Path(cbz_file).stem}.pdf"
         output_path = os.path.join(output_folder, pdf_filename)
         
         print(f"\n[{idx}/{len(cbz_files)}] 处理: {cbz_file}")
@@ -844,7 +893,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
             c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
             
             # 设置PDF元数据
-            title = Path(cbz_file).stem
+            title = normalized_cbz_name if comic_name else Path(cbz_file).stem
             c.setTitle(title)
             c.setAuthor("Comic Packer")
             c.setSubject("Comic Book")
@@ -1195,4 +1244,3 @@ if __name__ == "__main__":
                     except Exception as e:
                         print(f"  删除失败: {filename} - {e}")
             print(f"✓ 已清理 {pdf_count} 个PDF文件")
-

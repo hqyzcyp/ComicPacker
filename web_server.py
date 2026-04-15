@@ -12,6 +12,7 @@ import queue
 import sys
 import io
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
@@ -24,7 +25,9 @@ from main import (
     pack_comics_to_pdf,
     pack_comics_by_book,
     convert_cbz_to_pdf,
-    get_sorted_zip_files
+    natural_sort_key,
+    extract_volume_number,
+    sanitize_output_component
 )
 
 app = Flask(__name__)
@@ -38,6 +41,12 @@ cancelled_jobs = set()  # 跟踪被取消的任务
 console_output = []  # 存储最新的控制台输出
 console_output_lock = threading.Lock()
 MAX_CONSOLE_LINES = 20  # 最多保留20行输出
+COMIC_FILE_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
+CONVERTIBLE_COMIC_EXTENSIONS = {'.zip', '.cbz'}
+FOLDER_METADATA_BLACKLIST = {
+    '完结', '未完', '连载中', '已完结', '未完结', '电子版', '掃圖', '扫图', '生肉',
+    '熟肉', 'pdf', 'zip', 'cbz', 'bili', '哔哩哔哩', '合集', '单行本'
+}
 
 
 def configure_server_logging():
@@ -52,6 +61,134 @@ def configure_server_logging():
         flask.cli.show_server_banner = lambda *args, **kwargs: None
     except Exception:
         pass
+
+
+def list_comic_files(folder_path: str, extensions: Optional[set] = None) -> List[str]:
+    """按自然顺序列出目录中的漫画文件。"""
+    target_extensions = {ext.lower() for ext in (extensions or COMIC_FILE_EXTENSIONS)}
+    items = []
+
+    for item in os.listdir(folder_path):
+        item_path = os.path.join(folder_path, item)
+        if not os.path.isfile(item_path):
+            continue
+        if Path(item).suffix.lower() in target_extensions:
+            items.append(item)
+
+    items.sort(key=natural_sort_key)
+    return items
+
+
+def extract_title_from_filename(file_stem: str) -> str:
+    """从 `漫画名 Vol.xx` 风格文件名中提取漫画名。"""
+    match = re.search(r'(?i)\bvol(?:ume)?[.\s_-]*\d+\b', file_stem or '')
+    if not match:
+        return ""
+
+    title = file_stem[:match.start()]
+    title = re.sub(r'[\s._-]+$', '', title)
+    return sanitize_output_component(title)
+
+
+def extract_folder_segments(folder_name: str) -> List[str]:
+    """提取文件夹名中 `[]` 内的片段。"""
+    segments = re.findall(r'\[([^\[\]]+)\]', folder_name or '')
+    if segments:
+        return [segment.strip() for segment in segments if segment.strip()]
+    return [folder_name.strip()] if folder_name.strip() else []
+
+
+def is_folder_metadata_segment(segment: str) -> bool:
+    """判断文件夹片段是否更像元数据而非漫画名。"""
+    cleaned = sanitize_output_component(segment)
+    if not cleaned:
+        return True
+    if extract_volume_number(cleaned):
+        return True
+
+    lowered = cleaned.lower()
+    if lowered in {item.lower() for item in FOLDER_METADATA_BLACKLIST}:
+        return True
+
+    return False
+
+
+def infer_title_from_folder(folder_name: str) -> str:
+    """
+    从 `[漫画名][][]` 风格文件夹中尽量推断漫画名。
+    由于元数据顺序并不稳定，只做最佳努力推断，并允许前端覆盖。
+    """
+    segments = extract_folder_segments(folder_name)
+    candidates = [segment for segment in segments if not is_folder_metadata_segment(segment)]
+
+    if not candidates:
+        return ""
+    if len(candidates) == 1:
+        return sanitize_output_component(candidates[0])
+
+    return sanitize_output_component(max(candidates, key=lambda value: (len(value), -candidates.index(value))))
+
+
+def build_output_preview(comic_name: str, sample_volume: Optional[str]) -> str:
+    """生成输出命名预览。"""
+    safe_title = sanitize_output_component(comic_name)
+    volume_number = sample_volume or '01'
+
+    if safe_title:
+        return f"{safe_title} Vol.{volume_number}"
+
+    return f"漫画名 Vol.{volume_number}"
+
+
+def build_suggested_output_dir(comic_name: str) -> str:
+    """根据漫画名生成更规范的输出目录。"""
+    safe_title = sanitize_output_component(comic_name)
+    return f"./output/{safe_title}" if safe_title else "./output"
+
+
+def analyze_comic_folder(folder_path: str) -> dict:
+    """读取漫画文件夹并返回命名分析结果。"""
+    all_comic_files = list_comic_files(folder_path, COMIC_FILE_EXTENSIONS)
+    convertible_files = [
+        file_name for file_name in all_comic_files
+        if Path(file_name).suffix.lower() in CONVERTIBLE_COMIC_EXTENSIONS
+    ]
+
+    sample_files = convertible_files or all_comic_files
+    first_file_name = sample_files[0] if sample_files else None
+    first_file_stem = Path(first_file_name).stem if first_file_name else ""
+    sample_volume = extract_volume_number(first_file_stem)
+    file_title = extract_title_from_filename(first_file_stem)
+    folder_title = infer_title_from_folder(Path(folder_path).name)
+    inferred_title = file_title or folder_title
+
+    if file_title:
+        naming_source = 'filename'
+        naming_pattern = 'title_volume'
+        confidence = 'high'
+    elif sample_volume and folder_title:
+        naming_source = 'folder'
+        naming_pattern = 'volume_only'
+        confidence = 'medium'
+    else:
+        naming_source = 'unknown'
+        naming_pattern = 'unknown'
+        confidence = 'low'
+
+    return {
+        'first_file_name': first_file_name,
+        'first_file_stem': first_file_stem or None,
+        'comic_name': inferred_title or '',
+        'folder_title_candidate': folder_title or None,
+        'sample_volume': sample_volume or '01',
+        'output_preview': build_output_preview(inferred_title, sample_volume),
+        'suggested_output_dir': build_suggested_output_dir(inferred_title),
+        'naming_source': naming_source,
+        'naming_pattern': naming_pattern,
+        'naming_confidence': confidence,
+        'total_comic_files': len(all_comic_files),
+        'convertible_file_count': len(convertible_files)
+    }
 
 
 class ConsoleCapture(io.StringIO):
@@ -163,6 +300,7 @@ def worker_thread():
                 # 执行转换任务
                 params = job['parameters']
                 mode = params.get('mode', 'batch')
+                comic_name = params.get('comic_name', '').strip()
                 
                 print(f"[WORKER] Starting conversion in {mode} mode")
                 tracker.update('init', 0, 100, f'开始 {mode} 模式转换...')
@@ -184,7 +322,8 @@ def worker_thread():
                         output_folder=params.get('output', './output'),
                         convert_to_mobi=params.get('convert_to_mobi', False),
                         kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update
+                        progress_callback=tracker.update,
+                        comic_name=comic_name
                     )
                 elif mode == 'cbz':
                     convert_cbz_to_pdf_with_progress(
@@ -193,7 +332,8 @@ def worker_thread():
                         output_folder=params.get('output', './output'),
                         convert_to_mobi=params.get('convert_to_mobi', False),
                         kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update
+                        progress_callback=tracker.update,
+                        comic_name=comic_name
                     )
                 
                 # 任务完成
@@ -267,21 +407,25 @@ def pack_comics_by_book_with_progress(folder_path: str, pdf_prefix: str = "",
                                       output_folder: str = './output',
                                       convert_to_mobi: bool = False, 
                                       kindle_profile: str = 'KPW5',
-                                      progress_callback: Optional[Callable] = None):
+                                      progress_callback: Optional[Callable] = None,
+                                      comic_name: str = ""):
     """按书打包模式（带进度回调）"""
     # 直接调用main.py中的函数，它会通过progress_callback报告所有进度
     pack_comics_by_book(folder_path, pdf_prefix, output_folder, 
-                       convert_to_mobi, kindle_profile, progress_callback)
+                       convert_to_mobi, kindle_profile, progress_callback,
+                       comic_name=comic_name)
 
 
 def convert_cbz_to_pdf_with_progress(folder_path: str, cbz_prefix: str = "",
                                      output_folder: str = './output',
                                      convert_to_mobi: bool = False,
                                      kindle_profile: str = 'KPW5',
-                                     progress_callback: Optional[Callable] = None):
+                                     progress_callback: Optional[Callable] = None,
+                                     comic_name: str = ""):
     """CBZ转PDF模式（带进度回调）"""
     convert_cbz_to_pdf(folder_path, cbz_prefix, output_folder, 
-                        convert_to_mobi, kindle_profile, progress_callback)
+                        convert_to_mobi, kindle_profile, progress_callback,
+                        comic_name=comic_name)
 
 
 # ============= API路由 =============
@@ -312,7 +456,7 @@ def browse_files():
         # 列出目录内容
         items = []
         try:
-            for item in sorted(os.listdir(abs_path)):
+            for item in sorted(os.listdir(abs_path), key=natural_sort_key):
                 item_path = os.path.join(abs_path, item)
                 is_dir = os.path.isdir(item_path)
                 
@@ -320,9 +464,11 @@ def browse_files():
                 file_count = 0
                 if is_dir:
                     try:
-                        # 统计ZIP/CBZ文件数量
-                        file_count = len([f for f in os.listdir(item_path) 
-                                        if f.endswith(('.zip', '.cbz'))])
+                        # 统计漫画文件数量
+                        file_count = len([
+                            f for f in os.listdir(item_path)
+                            if Path(f).suffix.lower() in COMIC_FILE_EXTENSIONS
+                        ])
                     except:
                         file_count = 0
                 
@@ -358,10 +504,11 @@ def detect_mode():
         if not os.path.isdir(folder_path):
             return jsonify({'error': '不是目录'}), 400
         
-        # 统计文件类型
+        # 统计文件类型并读取命名分析
         cbz_count = 0
         zip_count = 0
         vol_files_count = 0  # 统计以Vol开头的文件
+        folder_analysis = analyze_comic_folder(folder_path)
         
         try:
             for item in os.listdir(folder_path):
@@ -392,7 +539,8 @@ def detect_mode():
             'zip_count': zip_count,
             'total_files': cbz_count + zip_count,
             'has_vol_files': vol_files_count > 0,
-            'vol_files_count': vol_files_count
+            'vol_files_count': vol_files_count,
+            **folder_analysis
         })
         
     except Exception as e:
@@ -482,6 +630,16 @@ def create_job():
         if not os.path.exists(params['folder']):
             print(f"[API] 创建任务失败: 文件夹不存在 - {params['folder']}")
             return jsonify({'error': '文件夹不存在'}), 400
+
+        folder_analysis = analyze_comic_folder(params['folder'])
+        comic_name = sanitize_output_component(params.get('comic_name', '').strip()) or folder_analysis.get('comic_name', '')
+        params['comic_name'] = comic_name
+
+        if params.get('mode') == 'batch' and comic_name and not params.get('prefix'):
+            params['prefix'] = comic_name
+
+        if not params.get('output'):
+            params['output'] = folder_analysis.get('suggested_output_dir', './output')
         
         # 创建任务
         job_id = str(uuid.uuid4())

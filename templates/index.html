@@ -30,8 +30,18 @@
                     <div class="loading">加载中...</div>
                 </div>
                 <div class="selected-folder">
-                    <strong>已选择:</strong>
-                    <span id="selected-folder-display">未选择</span>
+                    <div class="selected-folder-row">
+                        <strong>已选择:</strong>
+                        <span id="selected-folder-display">未选择</span>
+                    </div>
+                    <div class="selected-folder-row">
+                        <strong>首个文件:</strong>
+                        <span id="first-file-display">未读取</span>
+                    </div>
+                    <div class="selected-folder-row">
+                        <strong>命名来源:</strong>
+                        <span id="naming-source-display">等待选择文件夹</span>
+                    </div>
                 </div>
             </div>
 
@@ -58,8 +68,15 @@
                     </div>
 
                     <div class="form-group">
-                        <label for="prefix">文件名前缀:</label>
-                        <input type="text" id="prefix" name="prefix" placeholder="可选，如: 我的漫画">
+                        <label for="comic-name">漫画输出名:</label>
+                        <input type="text" id="comic-name" name="comic_name" placeholder="自动识别，可手动修改">
+                        <small class="help-text" id="comic-name-help">会优先从首个文件名推断漫画名，输出文件将尽量按“漫画名 Vol.xx”命名。</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label>输出名预览:</label>
+                        <div class="output-preview" id="output-name-preview">漫画名 Vol.01</div>
+                        <small class="help-text" id="output-preview-help">预览格式：漫画名 Vol.01</small>
                     </div>
 
                     <div class="form-group">

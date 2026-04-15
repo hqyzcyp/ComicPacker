@@ -6,15 +6,23 @@ const DEFAULT_PATH_KEY = 'comicpacker_default_path';
 // State management
 let currentPath = '.';
 let selectedFolder = null;
+let selectedFolderAnalysis = null;
 
 // DOM elements
 const fileList = document.getElementById('file-list');
 const currentPathInput = document.getElementById('current-path');
 const selectedFolderDisplay = document.getElementById('selected-folder-display');
+const firstFileDisplay = document.getElementById('first-file-display');
+const namingSourceDisplay = document.getElementById('naming-source-display');
 const conversionForm = document.getElementById('conversion-form');
 const jobList = document.getElementById('job-list');
 const startBtn = document.getElementById('start-btn');
 const clearHistoryBtn = document.getElementById('clear-history-btn');
+const comicNameInput = document.getElementById('comic-name');
+const comicNameHelp = document.getElementById('comic-name-help');
+const outputInput = document.getElementById('output');
+const outputNamePreview = document.getElementById('output-name-preview');
+const outputPreviewHelp = document.getElementById('output-preview-help');
 
 // Settings elements
 const setDefaultBtn = document.getElementById('set-default-btn');
@@ -33,6 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadDirectory(startPath);
     loadJobs();
     setupEventListeners();
+    updateOutputPreview();
 });
 
 // Settings management
@@ -66,6 +75,102 @@ function showNotification(message, type = 'info') {
     }, 3000);
 }
 
+function sanitizePathComponent(value) {
+    return (value || '')
+        .replace(/[<>:"/\\|?*]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[ ._-]+$/g, '');
+}
+
+function getCurrentComicName() {
+    return (comicNameInput.value || '').trim();
+}
+
+function setOutputValue(value, autoManaged = true) {
+    outputInput.value = value;
+    outputInput.dataset.autoManaged = autoManaged ? 'true' : 'false';
+}
+
+function formatNamingSource(data) {
+    if (!data || !data.first_file_name) {
+        return '未找到漫画文件，请手动填写漫画名';
+    }
+
+    const sourceLabel = {
+        filename: '已从首个文件名自动提取',
+        folder: '文件名仅包含 Vol，已从文件夹名推断',
+        unknown: '暂时无法可靠推断'
+    }[data.naming_source] || '暂时无法可靠推断';
+
+    const confidenceLabel = {
+        high: '高',
+        medium: '中',
+        low: '低'
+    }[data.naming_confidence] || '低';
+
+    return `${sourceLabel}（置信度${confidenceLabel}）`;
+}
+
+function updateOutputFolderSuggestion(force = false) {
+    const canAutoUpdate = force || outputInput.dataset.autoManaged !== 'false' || !outputInput.value.trim();
+    if (!canAutoUpdate) {
+        return;
+    }
+
+    const comicName = sanitizePathComponent(getCurrentComicName());
+
+    if (comicName) {
+        setOutputValue(`./output/${comicName}`, true);
+        return;
+    }
+
+    if (selectedFolderAnalysis?.suggested_output_dir) {
+        setOutputValue(selectedFolderAnalysis.suggested_output_dir, true);
+        return;
+    }
+
+    setOutputValue('./output', true);
+}
+
+function updateOutputPreview() {
+    const previewVolume = selectedFolderAnalysis?.sample_volume || '01';
+    const comicName = getCurrentComicName();
+    const batchPreviewBase = comicName || '漫画名';
+    const previewText = modeSelect.value === 'batch'
+        ? `${batchPreviewBase}_CH-001_to_CH-010`
+        : (comicName
+            ? `${comicName} Vol.${previewVolume}`
+            : (selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`));
+
+    outputNamePreview.textContent = previewText;
+
+    if (selectedFolderAnalysis?.first_file_name) {
+        outputPreviewHelp.textContent = `源文件示例：${selectedFolderAnalysis.first_file_name}`;
+    } else {
+        outputPreviewHelp.textContent = '预览格式：漫画名 Vol.01';
+    }
+}
+
+function applyFolderAnalysis(data) {
+    selectedFolderAnalysis = data;
+    firstFileDisplay.textContent = data.first_file_name || '未找到漫画文件';
+    namingSourceDisplay.textContent = formatNamingSource(data);
+
+    comicNameInput.value = data.comic_name || '';
+
+    if (data.naming_source === 'filename') {
+        comicNameHelp.textContent = '已从首个文件名提取漫画名；如果你想统一输出名，可以直接修改这里。';
+    } else if (data.naming_source === 'folder') {
+        comicNameHelp.textContent = '首个文件只有 Vol 编号，漫画名来自文件夹推断；开始转换前建议确认一次。';
+    } else {
+        comicNameHelp.textContent = '未能稳定识别漫画名，请手动填写，输出预览会同步更新。';
+    }
+
+    updateOutputPreview();
+    updateOutputFolderSuggestion(true);
+}
+
 // Event listeners
 function setupEventListeners() {
     // Settings controls
@@ -95,6 +200,8 @@ function setupEventListeners() {
         } else {
             batchSizeGroup.style.display = 'none';
         }
+
+        updateOutputPreview();
     });
 
     // MOBI conversion checkbox
@@ -106,17 +213,13 @@ function setupEventListeners() {
         }
     });
 
-    // Prefix input - auto update output folder
-    const prefixInput = document.getElementById('prefix');
-    const outputInput = document.getElementById('output');
+    comicNameInput.addEventListener('input', () => {
+        updateOutputPreview();
+        updateOutputFolderSuggestion();
+    });
 
-    prefixInput.addEventListener('input', (e) => {
-        const prefix = e.target.value.trim();
-        if (prefix) {
-            outputInput.value = `./output/${prefix}`;
-        } else {
-            outputInput.value = './output';
-        }
+    outputInput.addEventListener('input', () => {
+        outputInput.dataset.autoManaged = 'false';
     });
 
     // Form submission
@@ -208,18 +311,11 @@ function renderFileList(items) {
 async function selectFolder(path) {
     selectedFolder = path;
     selectedFolderDisplay.textContent = path;
-
-    // 自动设置输出目录为 ./output/文件夹名
-    const folderName = path.split('/').filter(p => p).pop(); // 获取最后一个非空路径部分
-    const outputInput = document.getElementById('output');
-    const prefixInput = document.getElementById('prefix');
-
-    // Only update output if prefix is empty
-    if (folderName && !prefixInput.value.trim()) {
-        outputInput.value = `./output/${folderName}`;
-    } else if (!prefixInput.value.trim()) {
-        outputInput.value = './output'; // Fallback if folderName is empty
-    }
+    selectedFolderAnalysis = null;
+    firstFileDisplay.textContent = '读取中...';
+    namingSourceDisplay.textContent = '正在分析文件夹内容...';
+    outputInput.dataset.autoManaged = 'true';
+    updateOutputPreview();
 
     // 自动检测文件类型并切换模式
     await detectAndSwitchMode(path);
@@ -243,6 +339,7 @@ async function detectAndSwitchMode(folderPath) {
 
         const data = await response.json();
         const recommendedMode = data.recommended_mode;
+        applyFolderAnalysis(data);
 
         // 切换到推荐的模式
         modeSelect.value = recommendedMode;
@@ -256,15 +353,19 @@ async function detectAndSwitchMode(folderPath) {
             showNotification(`✓ 检测到 ${data.cbz_count} 个CBZ文件，已切换到CBZ模式`, 'info');
         } else if (data.zip_count > 0) {
             showNotification(`✓ 检测到 ${data.zip_count} 个ZIP文件，已切换到按书打包模式`, 'info');
+        } else if (data.total_comic_files > 0) {
+            showNotification(`✓ 已读取 ${data.total_comic_files} 个漫画文件`, 'info');
         }
 
-        // 检测到Vol开头的文件时提醒用户填写前缀
+        // 检测到Vol开头的文件时提醒用户确认漫画名
         if (data.has_vol_files) {
-            showNotification(`💡 检测到 ${data.vol_files_count} 个Vol开头的文件，建议填写文件名前缀`, 'warning');
+            showNotification(`💡 检测到 ${data.vol_files_count} 个仅含 Vol 编号的文件，请确认漫画输出名`, 'warning');
         }
 
     } catch (error) {
         console.error('Error detecting mode:', error);
+        firstFileDisplay.textContent = '读取失败';
+        namingSourceDisplay.textContent = '自动分析失败，请手动填写漫画名';
     }
 }
 
@@ -277,18 +378,14 @@ async function startConversion() {
 
     // Gather form data
     const formData = new FormData(conversionForm);
-    const prefix = formData.get('prefix') || '';
-
-    // 如果设置了前缀，则输出文件夹使用前缀名称
-    let outputFolder = formData.get('output') || './output';
-    if (prefix) {
-        outputFolder = `./output/${prefix}`;
-    }
+    const comicName = getCurrentComicName();
+    const outputFolder = (formData.get('output') || './output').trim() || './output';
 
     const params = {
         folder: selectedFolder,
         mode: formData.get('mode'),
-        prefix: prefix,
+        prefix: comicName,
+        comic_name: comicName,
         output: outputFolder,
         convert_to_mobi: convertToMobiCheckbox.checked,
         kindle_profile: formData.get('kindle_profile') || 'KPW5'
@@ -317,12 +414,6 @@ async function startConversion() {
 
         // Show success notification
         showNotification(`✓ 任务已提交: ${data.job_id.substring(0, 8)}`, 'success');
-
-        // 自动重置文件名前缀和输出目录
-        const prefixInput = document.getElementById('prefix');
-        const outputInput = document.getElementById('output');
-        prefixInput.value = '';
-        outputInput.value = './output';
 
         // Refresh job list to show new job
         loadJobs();
