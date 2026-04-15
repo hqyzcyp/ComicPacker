@@ -281,3 +281,107 @@
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
 | 2026-04-15 | `omx explore` 依赖的 cargo 缺失，无法使用只读 explore 命令 | 1 | 记录并退回普通 shell / 源码检查路径 |
+
+### Session Addendum: 性能瓶颈分析（启动）
+- **Status:** in_progress
+- **Actions taken:**
+  - 运行 planning-with-files 的 session catchup，并读取当前 planning files。
+  - 确认当前活跃高 CPU 进程为 `python web_server.py`（PID 526516）。
+  - 将 `task_plan.md` 重置为本轮“漫画转换性能瓶颈分析”任务。
+
+### Session Addendum: 性能瓶颈分析（完成）
+- **Status:** complete
+- **Actions taken:**
+  - 对运行中的 `python web_server.py` 做进程、线程、CPU、I/O 采样。
+  - 监控 `/mnt/data/down/comic_output/尖帽子的魔法工坊` 的真实输出时间线，拆分 PDF 阶段与 MOBI 阶段耗时。
+  - 回溯 `web_server.py` 与 `main.py` 的转换数据流，定位串行热点与重复编解码路径。
+  - 归纳为“单核 CPU 受限 + 全量预处理 + 重复图像编解码 + 单 worker 串行”四类问题。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Additional Evidence: performance investigation
+| Evidence | Observation | Conclusion |
+|----------|-------------|------------|
+| `pidstat -durh -p 526516 1 3` | 连续 3 秒 `%CPU=100`、`%wait=0`、读写速率约 0 | 任务是单核用户态 CPU 瓶颈，不是 I/O 瓶颈 |
+| `/proc/526516/task` | 主线程睡眠，worker 线程运行 | 真正跑转换的是后台 worker 线程 |
+| `vmstat` / `iostat` | 全机大部分核心空闲，磁盘 util 低 | 当前实现没有利用多核，也没被磁盘卡住 |
+| 输出文件时间线 | 每卷 PDF 约 48~56s，MOBI 约 13~14s | 主要慢在 PDF 生成，不在 PDF→MOBI |
+| `main.py` 源码 | `preprocess_images()` 顺序处理，且会重编码 JPEG 后再交给 ReportLab | 图片预处理/重复编解码是核心热点 |
+
+### Session Addendum: 性能优化第一阶段（设计完成）
+- **Status:** complete
+- **Actions taken:**
+  - 运行 session catchup，并确认上一轮性能调查已经完成。
+  - 读取 `main.py` 热点函数，锁定首轮改动范围为 `preprocess_image()` / `preprocess_images()`。
+  - 对真实 CBZ 样本做格式/尺寸抽样，确认 JPEG + RGB 页面占主导，且大量页面无需缩放。
+  - 运行小型微基准，对比串行、4 线程、4 进程三种预处理方式，确认并行化和 JPEG 直通都值得优先实现。
+  - 将 `task_plan.md` 切换到“漫画转换性能优化（第一阶段）”实施计划。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Session Addendum: 性能优化第一阶段（实现完成）
+- **Status:** complete
+- **Actions taken:**
+  - 在 `main.py` 中加入 JPEG 直通 fast path，避免对无需缩放的 RGB JPEG 页面重复编码。
+  - 为 `preprocess_images()` 增加有界多进程预处理，并加入抽样启发式，避免对轻量卷过度并行化。
+  - 修复 `pack_comics_to_pdf()` 中缺失的 `effective_prefix` 定义，补上批次模式的运行时缺口。
+  - 新增 `tests/test_preprocess.py`，锁定 fast path、透明 PNG 转码、worker 数控制和并行顺序保持等行为。
+  - 运行语法检查、单元测试、合成 ZIP/CBZ smoke test，以及真实样本基准对比。
+- **Files created/modified:**
+  - main.py
+  - tests/test_preprocess.py
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Additional Test Results: performance optimization phase 1
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile main.py web_server.py tests/test_preprocess.py` | 无语法错误 | 通过 | ✓ |
+| 单元测试 | `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` | 4 个测试全部通过 | 通过 | ✓ |
+| ZIP batch smoke | 合成 `CH-001.zip` + `pack_comics_to_pdf(...)` | 成功生成 batch PDF | 生成 `zip_input/pdf/测试漫画_CH-001_to_CH-001.pdf` | ✓ |
+| CBZ smoke | 合成 `Vol.01.cbz` + `convert_cbz_to_pdf(...)` | 成功生成 CBZ PDF | 生成 `测试漫画/pdf/测试漫画 Vol.01.pdf` | ✓ |
+| 真实样本 fast-JPEG 基准 | `Vol.01.cbz` 前 40 页 | 快速完成且保持顺序 | `workers=1` 约 `0.010s`，`workers=4` 约 `0.003s` | ✓ |
+| 真实样本 resize-heavy 基准 | `尖帽子的魔法工坊 Vol.04.zip` 前 40 页 | 并行版本显著快于串行 | `workers=1` 约 `4.541s`，`workers=4` 约 `1.226s` | ✓ |
+
+### Session Addendum: 性能优化第二阶段（基线完成）
+- **Status:** complete
+- **Actions taken:**
+  - 对真实 ZIP / CBZ 单卷运行做 `/usr/bin/time -v` 基线测量。
+  - 确认第一阶段后真实样本仍有约 `1.1~1.2 GiB` 峰值 RSS，说明“整卷全量持有”仍是主要剩余问题。
+  - 将 `task_plan.md` 切换到“漫画转换性能优化（第二阶段）”，目标改为增量式 PDF 生成重排。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Session Addendum: 性能优化第二阶段（实现完成）
+- **Status:** complete
+- **Actions taken:**
+  - 为 `batch` / `book` / `cbz` 三条 PDF 生成路径新增端到端回归测试，并用 `pdfinfo` 锁定输出页数。
+  - 在 `main.py` 中加入 ZIP/CBZ 图片条目元数据 helper，推迟图片字节读取时机。
+  - 将 `create_pdf_from_chapters()`、`pack_comics_by_book()`、`convert_cbz_to_pdf()` 改为按章节/按压缩包增量处理。
+  - 为单章节/默认章节的大卷增加 32 页默认分块，避免再次把整卷页面一次性读入和预处理。
+  - 运行完整测试，并对真实 ZIP / CBZ 单卷重新测量 wall time 与 peak RSS。
+- **Files created/modified:**
+  - main.py
+  - tests/test_pdf_workflows.py
+  - tests/test_preprocess.py
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Additional Test Results: performance optimization phase 2
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile main.py web_server.py tests/test_preprocess.py tests/test_pdf_workflows.py` | 无语法错误 | 通过 | ✓ |
+| 单元/回归测试 | `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` | 8 个测试全部通过 | 通过 | ✓ |
+| batch PDF 页数回归 | 合成 `CH-001.zip`（3 张图） | PDF `Pages = 3` | 通过 | ✓ |
+| book PDF 页数回归 | 合成 `Vol.01.zip`（2 章节/4 张图） | PDF `Pages = 4` | 通过 | ✓ |
+| cbz PDF 页数回归 | 合成 `Vol.01.cbz`（2 章节/4 张图） | PDF `Pages = 4` | 通过 | ✓ |
+| 真实 ZIP 基准 | `尖帽子的魔法工坊 Vol.04.zip` | 降低 RSS，最好也改善耗时 | `50.38s -> 44.44s`，`1223900 kB -> 718336 kB` | ✓ |
+| 真实 CBZ 基准 | `Vol.01.cbz` | 降低 RSS，最好也改善耗时 | `59.29s -> 52.84s`，`1145536 kB -> 869624 kB` | ✓ |

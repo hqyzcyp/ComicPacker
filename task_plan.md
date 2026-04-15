@@ -1,61 +1,55 @@
-# Task Plan: 输出根目录重构 + PDF→MOBI 模式
+# Task Plan: 漫画转换性能优化（第二阶段）
 
 ## Goal
-将“输出目录”重新定义为输出根目录：实际执行转换时，自动在根目录下创建以漫画名命名的文件夹，并在其中创建 `pdf/` 与 `mobi/` 子目录，把生成结果按格式分别落盘；同时新增 `pdf` 转换模式，用于检测目录中的 PDF 文件并批量转换为 MOBI。
+在第一阶段完成热点预处理优化后，继续降低真实整卷转换的峰值内存与整体耗时。第二阶段聚焦于消除“整卷图片一次性读入 + 整卷预处理后再统一写 PDF”的结构性问题，改为按章节/按压缩包增量处理，并用真实样本重新对比时间与 RSS。
 
 ## Current Phase
 Complete
 
 ## Phases
 ### Phase 0: Context Recovery
-- [x] 运行 session catchup：`python3 ~/.codex/skills/planning-with-files/scripts/session-catchup.py "$(pwd)"`
-- [x] 读取 `task_plan.md`、`findings.md`、`progress.md`
-- [x] 运行 `git diff --stat` / `git status --short` 了解当前工作区状态
-- [x] 确认 `omx explore` 在当前环境不可用（缺少 cargo），后续改走普通代码检查路径
+- [x] 运行 session catchup 并读取现有 planning files
+- [x] 确认第一阶段优化已完成且验证通过
+- [x] 检查当前工作区改动基于第一阶段结果继续推进
 - **Status:** complete
 
-### Phase 1: Discovery & Design
-- [x] 定位 `main.py`、`web_server.py`、`static/app.js`、`templates/index.html` 中与输出目录、模式检测、任务创建有关的代码
-- [x] 确认当前行为：输出文件直接写入 `output`，推荐模式仅支持 `book/cbz/batch`
-- [x] 设计统一输出布局 helper 与 `pdf` 模式接入点
+### Phase 1: Baseline + Design
+- [x] 对真实 ZIP / CBZ 单卷运行做时间与 RSS 基线测量
+- [x] 确认当前剩余主问题是“整卷全量持有导致的 >1GiB 峰值内存”
+- [x] 设计保持输出顺序不变的增量处理方案
 - **Status:** complete
 
-### Phase 2: Implementation
-- [x] 调整后端输出目录布局：`<output_root>/<漫画名>/pdf` 与 `<output_root>/<漫画名>/mobi`
-- [x] 让 `book` / `batch` / `cbz` / `pdf` 模式都遵循统一输出布局
-- [x] 新增批量 `PDF -> MOBI` 转换函数与 Web worker 分支
-- [x] 更新模式检测、前端模式选项与相关提示文案
-- [x] 修正 CLI / README 中与输出目录或模式相关的说明
+### Phase 2: Regression Lock + Refactor
+- [x] 为 batch/book/cbz 三条 PDF 生成路径补充端到端回归测试
+- [x] 将 `main.py` 改为按章节/按压缩包增量读取、预处理、写 PDF
+- [x] 保持现有输出命名、页顺序与书签行为不变
 - **Status:** complete
 
 ### Phase 3: Verification
-- [x] 运行 `python3 -m py_compile main.py web_server.py`
-- [x] 运行 `node --check static/app.js`
-- [x] 用 Flask `test_client()` 验证 `/api/detect-mode` 可识别 PDF 模式
-- [x] 用真实 CBZ + smoke PDF 验证 `漫画名/pdf`、`漫画名/mobi` 结构以及 PDF→MOBI 落盘结果
-- [x] 运行 `conda run -n comic python main.py --help`，确认 CLI 新模式/参数已暴露
-- [x] 回写 `task_plan.md`、`findings.md`、`progress.md`
+- [x] 运行语法检查与完整测试
+- [x] 用真实样本重新测量时间与峰值 RSS
+- [x] 记录收益、风险和后续更大范围优化项
 - **Status:** complete
 
 ## Key Questions
-1. 统一输出目录布局应由哪一层负责，才能覆盖 CLI 与 Web 两条路径？
-2. `pdf` 模式是“直接把现有 PDF 批量转成 MOBI”，还是仍受 `convert_to_mobi` 开关控制？
-3. 批次模式在启用新布局后，文件名与清理逻辑是否还需要保留旧行为？
+1. 能否在不改变输出顺序和现有接口的前提下，把 ZIP/CBZ 处理改为增量式？
+2. 这样做能否显著压低真实单卷转换的峰值 RSS？
+3. 在降低内存的同时，整卷总耗时是否也会改善，至少不明显回退？
+4. batch/book/cbz 三条路径是否都能在这一轮统一收敛到更小的内存占用模式？
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| 输出参数改为“根目录”语义，最终落盘目录由 `main.py` 的统一 helper 派生 | 这样 CLI/Web 都复用同一规则，不必各自拼接漫画目录 |
-| `pdf` 模式直接执行 PDF→MOBI，不依赖额外勾选项决定是否转换 | 模式本身的职责就是生成 MOBI，避免 UI/后端语义冲突 |
-| `book/cbz` 在未显式传入漫画名时也会尽量根据文件名/文件夹名推断目录名 | 保证新输出结构默认可用，不强依赖手动输入 |
-| 删除 CLI 中“启用 MOBI 后清理 PDF”的旧尾处理 | 新需求要求保留 `pdf/` 与 `mobi/` 两类产物 |
+| 第二阶段优先解决全量持有图片的问题 | 第一阶段后，真实样本仍有约 1.1~1.2 GiB 峰值 RSS，这是最突出的剩余问题 |
+| 先补回归测试，再做结构性重排 | 这一轮会改动 PDF 生成路径，先锁住页数和生成成功率更稳妥 |
+| 采用按章节/按压缩包增量处理 | 能在不大改上层 API 的前提下，把内存占用从“整卷级”降到“章节级/单包级” |
+| 默认再叠加 32 页分块预处理 | 这样即使是单章节/默认章节的大卷，也不会再次退化成整卷级内存占用 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| `omx explore` 无法运行（缺少 cargo） | 1 | 记录后退回普通 shell / 源码阅读路径 |
+| 暂无 | - | - |
 
 ## Notes
-- `main.py` 现在负责统一创建输出结构；Web 前端只负责收集“输出根目录”。
-- 新增 `pdf` 模式后，Web 自动检测 PDF 文件夹并切换到 `PDF 转 MOBI`。
-- 验证期间使用了真实 `/mnt` 样本目录与临时目录组合，避免污染仓库输出目录。
+- 第一阶段结论与验证保留在 `findings.md` / `progress.md`，本轮只补充第二阶段证据。
+- 若第二阶段完成后仍有明显瓶颈，后续候选项包括：复用持久进程池、减少 ZIP 重复打开、进一步降低 ReportLab 重复解码、以及 Web worker 并行模型优化。

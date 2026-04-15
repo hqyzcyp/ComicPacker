@@ -222,3 +222,177 @@
 ## Remaining Risks / Follow-up
 - `book` / `cbz` 在 CLI 未显式传入 `--comic-name` 时依赖“首个文件名/文件夹名推断”；对于极端命名样本仍可能需要用户手动覆盖。
 - `pdf` 模式目前只扫描所选目录的一级 PDF 文件，不做递归子目录遍历；这是当前行为，不是 bug。
+
+## Performance Investigation Kickoff (2026-04-15)
+- 当前仓库已有历史 planning 记录，但本轮任务已切换为“在线分析漫画转换性能瓶颈”。
+- 运行时采样显示当前最高相关负载进程是 `python web_server.py`（PID 526516），累计 CPU 约 39%，已运行约 8 分钟。
+- 目前尚未看到独立的 `kindlegen` / `kcc` 子进程出现在进程列表顶部，说明热点很可能仍在 Python 进程内部或其线程中。
+
+## Runtime Profiling Findings: 漫画转换性能（2026-04-15）
+- 运行中的核心转换进程是 `python web_server.py`（PID 526516）。
+- `/proc/526516/task` 显示该进程在采样时有 2 个线程，其中 `TID 526517` 为 `R (running)`，主线程 `TID 526516` 为 `S (sleeping)`，说明真正跑转换的是后台 worker 线程。
+- `pidstat -durh -p 526516 1 3` 在 15:19:45~15:19:47 连续 3 秒显示：
+  - `%usr=100`、`%system=0`、`%wait=0`
+  - `kB_rd/s=0`、`kB_wr/s=0`
+  这说明瓶颈是**纯用户态 CPU 计算**，不是磁盘 I/O 或系统调用等待。
+- 同期系统级 `vmstat` / `iostat` 显示：
+  - 全机 12 核大部分空闲（idle ~90%）
+  - iowait 接近 0
+  - NVMe util 很低
+  说明当前任务只吃满**单核**，机器总体算力没有被利用。
+- 进程 RSS 约 1.18~1.29 GiB，但宿主机可用内存充足（available ~26 GiB），当前不是内存不足或 swap 导致的慢。
+- 真实输出时间线（`/mnt/data/down/comic_output/尖帽子的魔法工坊`）显示：
+  - `Vol.04.pdf` 完成于 15:19:20，`Vol.04.mobi` 完成于 15:19:32（MOBI 阶段约 13s）
+  - `Vol.05.pdf` 完成于 15:20:28，距上一个 MOBI 完成约 56s（PDF 阶段约 56s）
+  - `Vol.05.mobi` 完成于 15:20:42（MOBI 阶段约 14s）
+  - `Vol.06.pdf` 完成于 15:21:30，距上一个 MOBI 完成约 48s（PDF 阶段约 48s）
+  - `Vol.06.mobi` 完成于 15:21:43（MOBI 阶段约 13s）
+- 由以上样本可估算：**每卷约 66s，其中 PDF 生成约 48~56s，占总耗时约 75%~80%；PDF→MOBI 仅约 13~14s，占 20% 左右。**
+
+## Code Path Findings: 根因映射
+- `web_server.py` 只有一个后台 `worker_thread()` 消费 `job_queue`，单任务执行路径串行，天然只能由一个 worker 线程推进。
+- `main.py` 中 `get_images_from_zip()` / `get_chapters_from_zip()` 会先把 ZIP/CBZ 内所有图片**整批读入内存**。
+- `pack_comics_by_book()` / `convert_cbz_to_pdf()` 会把整卷图片收集到 `all_images`，然后调用 `preprocess_images()` 进行**全量预处理**。
+- `preprocess_images()` 当前实现是**顺序 for-loop**，没有实际使用多进程/多线程；而 `preprocess_image()` 对每张图会：
+  1. `Image.open(...)` 解码
+  2. 可能 `resize(..., Image.LANCZOS)`
+  3. `convert('RGB')`
+  4. `img.save(..., format='JPEG', quality=95, optimize=True)` 重新编码
+- 预处理完成后，组装 PDF 时又会对 `img_info['data']` 再次创建 `ImageReader(io.BytesIO(...))` 交给 ReportLab 绘制，形成**解码 → 重采样/编码 → 再解码**的重复 CPU 开销。
+- 因为先收集整卷、再整卷预处理、再整卷写 PDF，所以不仅串行，而且会把大量图片字节和预处理结果同时留在内存里，造成 1GiB+ RSS。
+- 代码注释写着“在独立进程中执行”，但实际 `preprocess_images()` 并没有进程池，这是一个明显的“设计意图与当前实现不一致”信号。
+
+## Bottleneck Summary
+1. **主瓶颈：PDF 生成阶段的单线程图片预处理与重复编解码。**
+2. **次瓶颈：单 worker / 单任务串行流程，无法利用 12 核机器。**
+3. **次要问题：整卷全量加载到内存，增加内存占用并恶化缓存/GC 行为。**
+4. **不是主要瓶颈：磁盘 I/O、系统调用等待、MOBI 转换阶段。**
+
+## Performance Optimization Design: 第一阶段实现选择（2026-04-15）
+- 为继续上一轮性能调查，本轮先回看 `main.py` 热点实现，范围限定在 `preprocess_image()` / `preprocess_images()`。
+- 真实样本格式抽样：
+  - `/mnt/data/down/comic/[相反的你和我].../Vol.01.cbz` 前 40 张均为 `RGB` + `.jpeg`
+  - 这 40 张样本按当前阈值判断 `needs_resize = 0`
+  - 说明“已经是可直接用于 PDF 的 JPEG 页面”在真实输入中占比很高，避免重复 JPEG 重编码有现实收益。
+- 小型微基准（使用 `conda run -n comic python`，样本为 `Vol.01.cbz` 前 40 张）：
+  - 串行 `preprocess_image`：约 `1.445s`
+  - `ThreadPoolExecutor(max_workers=4)`：约 `0.870s`（~`1.66x`）
+  - `ProcessPoolExecutor(max_workers=4)`：24 张样本约 `0.257s`，显示出比线程更强的潜在加速空间
+- 由此决定本轮首选方案：
+  1. 在**无需缩放、无需颜色模式转换**时直接复用原始 JPEG 字节，跳过 `img.save(... optimize=True)`
+  2. 为 `preprocess_images()` 增加**有界并行预处理**，优先使用多进程来利用空闲 CPU 核心
+  3. 保持返回顺序、返回结构和上层调用方式不变，尽量把变更限制在热点函数内部
+- 顺手发现的同区域运行时缺口：`pack_comics_to_pdf()` 内打印和文件名前缀使用了未定义变量 `effective_prefix`，这是一个潜在运行时 `NameError`，若改动波及该段逻辑可一并收敛。
+
+## Performance Optimization Implementation: 第一阶段结果（2026-04-15）
+- `main.py` 新增三个 helper：
+  - `calculate_page_dimensions(...)`：统一计算页面适配尺寸
+  - `get_preprocess_worker_count(...)`：统一计算预处理并行度，支持 `COMICPACKER_PREPROCESS_WORKERS`
+  - `should_parallelize_preprocess(...)`：通过抽样元数据判断当前卷是否值得开多进程
+- `preprocess_image(...)` 现在新增 **RGB JPEG 直通 fast path**：
+  - 若页面无需缩放、原始格式就是 JPEG、颜色模式已是 RGB，则直接复用原始字节
+  - 跳过原先 `img.save(... format='JPEG', quality=95, optimize=True)` 的重复 JPEG 编码
+- `preprocess_images(...)` 现在支持 **有界多进程预处理**：
+  - 默认自动选取最多 4 个进程
+  - 但只在抽样判断“存在足够多需要缩放/转码的页面”时才启用
+  - 若并行执行异常，会自动回退到串行路径，不影响功能可用性
+- 同路径顺手修复：`pack_comics_to_pdf()` 中恢复 `effective_prefix` 定义，避免批次模式在有 ZIP 输入时触发运行时 `NameError`。
+
+## Verification Evidence: performance optimization phase 1
+- 语法/回归：
+  - `python3 -m py_compile main.py web_server.py tests/test_preprocess.py` 通过
+  - `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` 通过（4 个测试）
+- 新增回归测试覆盖：
+  1. 无需缩放的 RGB JPEG 会走直通 fast path
+  2. RGBA PNG 会被正确压平成 RGB JPEG
+  3. `COMICPACKER_PREPROCESS_WORKERS` 会被正确读取并受图片数限制
+  4. 并行预处理后仍保持输入顺序不变
+- 合成 smoke test：
+  - 使用临时目录构造一个 ZIP 和一个 CBZ 样本
+  - `pack_comics_to_pdf(...)` 成功生成 `zip_input/pdf/测试漫画_CH-001_to_CH-001.pdf`
+  - `convert_cbz_to_pdf(...)` 成功生成 `测试漫画/pdf/测试漫画 Vol.01.pdf`
+- 真实样本预处理基准（前 40 页）：
+  - `fast_jpeg_cbz`：`Vol.01.cbz`
+    - `workers=1`：约 `0.010s`
+    - `workers=4`：约 `0.003s`
+    - 由于启发式判断为 fast-path 卷，4 workers 下也不会错误开启多进程，说明 fast path 已把该类页面成本压到很低
+  - `resize_heavy_zip`：`尖帽子的魔法工坊 Vol.04.zip`
+    - `workers=1`：约 `4.541s`
+    - `workers=4`：约 `1.226s`
+    - 同样 40 页样本下约 **3.7x** 加速，证明“需要缩放的卷”会明显受益于并行化
+
+## Remaining Risks / Follow-up: performance optimization
+- 当前并行启发式基于前 12 张图片抽样，是经验型策略；若后续遇到“前几页轻、后面很重”的极端卷，可能仍需再调参。
+- 现有实现仍保持“先整卷收集，再批量预处理，再统一写 PDF”的总体结构，因此大卷内存占用问题只部分缓解，尚未根治。
+- `web_server.py` 仍是单 worker 串行消费任务；本轮优化提升的是**单任务处理速度**，不是多任务吞吐。
+
+## Performance Optimization Design: 第二阶段基线与方案（2026-04-15）
+- 真实整卷基线（第一阶段代码上测得）：
+  - `pack_comics_by_book()` 对 `尖帽子的魔法工坊 Vol.04.zip`
+    - wall time: 约 `50.38s`
+    - `Maximum resident set size`: `1223900 kB`
+  - `convert_cbz_to_pdf()` 对 `Vol.01.cbz`
+    - wall time: 约 `59.29s`
+    - `Maximum resident set size`: `1145536 kB`
+- 这表明在第一阶段优化后，**整卷级的图片持有与预处理结果持有**仍然把峰值 RSS 推到约 `1.1~1.2 GiB`。
+- 剩余结构性问题来自：
+  1. `get_chapters_from_zip()` / `get_images_from_zip()` 直接把整包图片读成字节列表
+  2. `pack_comics_by_book()` / `convert_cbz_to_pdf()` 先把整卷所有页面收集进 `all_images`
+  3. 再一次性 `preprocess_images(all_images, ...)`
+  4. 最后才统一写 PDF
+- 第二阶段方案：
+  - 新增“ZIP 内图片条目元数据”层，先只拿排序后的条目清单，不急着读图片字节
+  - 读取范围缩小到“当前章节”或“当前 ZIP 文件”
+  - 当前批次预处理完成后立即写入 PDF，再释放对应列表
+  - 保持对外 CLI / Web API、输出文件名、页顺序和现有调用方式不变
+- 预期收益：
+  - 峰值 RSS 从“整卷级”下降到“单章节级/单包级”
+  - 对大卷更友好，也给后续真正流式/迭代式处理打基础
+  - 总耗时理论上也有机会下降，因为更少的大列表拼接和内存压力会改善缓存/GC 行为
+
+## Performance Optimization Implementation: 第二阶段结果（2026-04-15）
+- 新增 ZIP/CBZ 图片条目元数据层：
+  - `list_image_entries(...)`
+  - `get_image_entries_from_zip(...)`
+  - `group_image_entries_by_chapter(...)`
+  - `get_chapter_entries_from_zip(...)`
+  - `read_images_from_zip(...)`
+  - `read_single_image_from_zip(...)`
+- 这些 helper 先拿“排序后的图片条目”，延迟到真正需要处理当前章节/当前 chunk 时才读图片字节。
+- `main.py` 新增 `draw_preprocessed_image(...)`，统一预处理后图片写 PDF 的逻辑，避免三条路径重复拼装页面代码。
+- `create_pdf_from_chapters()` 现在改为：
+  - 对每个 ZIP 逐个读取条目
+  - 当前 ZIP 的图片读入并预处理后立即写 PDF
+  - 不再把整个 batch 的所有图片攒进 `all_images`
+- `pack_comics_by_book()` 现在改为：
+  - 先按章节拿条目元数据
+  - 每个章节单独读取/预处理/写入 PDF
+  - 不再把整本书的所有章节图片与预处理结果同时留在内存中
+- `convert_cbz_to_pdf()` 现在改为：
+  - 封面只单独读取第一张图
+  - 其余页面按章节或默认章节增量读取并写入 PDF
+  - 对无章节结构的大 CBZ，也会继续按 **32 页默认分块** 处理，避免重新退化成整卷级内存占用
+- 新增 `get_preprocess_chunk_size(...)`，支持环境变量 `COMICPACKER_PREPROCESS_CHUNK_SIZE` 覆盖分块大小。
+
+## Verification Evidence: performance optimization phase 2
+- 语法/回归：
+  - `python3 -m py_compile main.py web_server.py tests/test_preprocess.py tests/test_pdf_workflows.py` 通过
+  - `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` 通过（8 个测试）
+- 新增端到端 PDF 工作流回归：
+  1. `batch` 模式：1 个 ZIP / 3 张图 => 输出 PDF `Pages = 3`
+  2. `book` 模式：2 个章节 / 共 4 张图 => 输出 PDF `Pages = 4`
+  3. `cbz` 模式：2 个章节 / 共 4 张图 => 输出 PDF `Pages = 4`
+- 真实样本基准（第二阶段后）：
+  - `pack_comics_by_book()` 对 `尖帽子的魔法工坊 Vol.04.zip`
+    - wall time: `50.38s -> 44.44s`（约 **11.8%** 改善）
+    - peak RSS: `1223900 kB -> 718336 kB`（约 **41.3%** 降低）
+  - `convert_cbz_to_pdf()` 对 `Vol.01.cbz`
+    - wall time: `59.29s -> 52.84s`（约 **10.9%** 改善）
+    - peak RSS: `1145536 kB -> 869624 kB`（约 **24.1%** 降低）
+- 结论：第二阶段不仅明显降低了内存峰值，也在真实整卷上带来了双位数的总耗时下降。
+
+## Remaining Risks / Follow-up: performance optimization phase 2
+- 当前分块处理会多次打开同一个 ZIP/CBZ；虽然总收益仍为正，但后续仍可考虑复用单个已打开的 `ZipFile` 句柄。
+- 多进程预处理仍是“每次 `preprocess_images()` 调用建一个进程池”；若想进一步提速，可探索在整卷范围内复用持久 worker 池。
+- ReportLab 侧仍会对传入图片再做解码；若继续追求更高性能，后续需要调查是否能减少这部分重复工作。
+- `web_server.py` 依旧是单 worker 模型；本轮继续提升的是单任务性能，不是并发任务吞吐。

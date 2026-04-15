@@ -12,6 +12,7 @@ import subprocess
 import shutil
 import stat
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable
 from PIL import Image
@@ -27,6 +28,7 @@ FOLDER_METADATA_BLACKLIST = {
     '完结', '未完', '连载中', '已完结', '未完结', '电子版', '掃圖', '扫图', '生肉',
     '熟肉', 'pdf', 'zip', 'cbz', 'bili', '哔哩哔哩', '合集', '单行本'
 }
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
 
 def natural_sort_key(filename: str) -> List:
     """
@@ -227,34 +229,86 @@ def get_sorted_zip_files(folder_path: str) -> List[str]:
     return get_sorted_files_with_extensions(folder_path, ('.zip',))
 
 
+def list_image_entries(zip_ref: zipfile.ZipFile) -> List[Tuple[str, str]]:
+    """
+    列出 ZIP/CBZ 中所有图片条目，返回:
+    [(修复后的显示名, 原始 ZIP 条目名), ...]
+    """
+    image_items = []
+
+    for file_info in zip_ref.filelist:
+        fixed_filename = fix_zip_filename(file_info.filename)
+        if Path(fixed_filename).suffix.lower() in IMAGE_EXTENSIONS:
+            image_items.append((fixed_filename, file_info.filename))
+
+    image_items.sort(key=lambda x: natural_sort_key(x[0]))
+    return image_items
+
+
+def get_image_entries_from_zip(zip_path: str) -> List[Tuple[str, str]]:
+    """
+    从 ZIP/CBZ 中提取排序后的图片条目元数据，不立即读取图片字节。
+    """
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        return list_image_entries(zip_ref)
+
+
+def group_image_entries_by_chapter(image_entries: List[Tuple[str, str]]) -> dict:
+    """
+    按文件夹将图片条目分组为章节。
+    返回: {章节名: [(修复后的显示名, 原始 ZIP 条目名), ...], ...}
+    """
+    chapters = {}
+
+    for fixed_filename, original_filename in image_entries:
+        path_parts = Path(fixed_filename).parts
+        chapter_name = path_parts[0] if len(path_parts) > 1 else "默认章节"
+        chapters.setdefault(chapter_name, []).append((fixed_filename, original_filename))
+
+    for chapter_name in chapters:
+        chapters[chapter_name].sort(key=lambda x: natural_sort_key(x[0]))
+
+    return chapters
+
+
+def get_chapter_entries_from_zip(zip_path: str) -> dict:
+    """
+    从 ZIP/CBZ 中提取按章节分组的图片条目元数据。
+    """
+    return group_image_entries_by_chapter(get_image_entries_from_zip(zip_path))
+
+
+def read_images_from_zip(zip_path: str, image_entries: List[Tuple[str, str]]) -> List[Tuple[str, bytes]]:
+    """
+    按给定图片条目列表读取 ZIP/CBZ 中的图片字节。
+    参数:
+        image_entries: [(修复后的显示名, 原始 ZIP 条目名), ...]
+    """
+    images = []
+    if not image_entries:
+        return images
+
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        for fixed_filename, original_filename in image_entries:
+            images.append((fixed_filename, zip_ref.read(original_filename)))
+
+    return images
+
+
+def read_single_image_from_zip(zip_path: str, original_filename: str) -> bytes:
+    """
+    从 ZIP/CBZ 中读取单张图片字节。
+    """
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        return zip_ref.read(original_filename)
+
+
 def get_images_from_zip(zip_path: str) -> List[Tuple[str, bytes]]:
     """
     从ZIP文件中提取所有图片文件
     返回: [(文件名, 图片数据), ...]
     """
-    images = []
-    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-    
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        # 获取所有图片文件
-        image_items = []
-        for file_info in zip_ref.filelist:
-            # 修复文件名编码
-            fixed_filename = fix_zip_filename(file_info.filename)
-            
-            # 检查是否是图片文件
-            if Path(fixed_filename).suffix.lower() in image_extensions:
-                image_items.append((fixed_filename, file_info.filename))
-        
-        # 按修复后的文件名排序
-        image_items.sort(key=lambda x: natural_sort_key(x[0]))
-        
-        # 读取图片数据
-        for fixed_filename, original_filename in image_items:
-            image_data = zip_ref.read(original_filename)
-            images.append((fixed_filename, image_data))
-    
-    return images
+    return read_images_from_zip(zip_path, get_image_entries_from_zip(zip_path))
 
 
 def get_chapters_from_zip(zip_path: str) -> dict:
@@ -262,47 +316,11 @@ def get_chapters_from_zip(zip_path: str) -> dict:
     从ZIP文件中按文件夹（章节）提取图片
     返回: {章节名: [(文件名, 图片数据), ...], ...}
     """
-    chapters = {}
-    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-    
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        # 获取所有图片文件
-        for file_info in zip_ref.filelist:
-            # 修复文件名编码
-            try:
-                # 尝试使用UTF-8解码
-                filename = file_info.filename
-            except:
-                filename = file_info.filename
-            
-            # 尝试修复编码问题
-            fixed_filename = fix_zip_filename(filename)
-            
-            # 检查是否是图片文件
-            if Path(fixed_filename).suffix.lower() not in image_extensions:
-                continue
-            
-            # 获取文件夹名作为章节名
-            path_parts = Path(fixed_filename).parts
-            if len(path_parts) > 1:
-                # 有文件夹结构
-                chapter_name = path_parts[0]
-            else:
-                # 没有文件夹，使用默认章节名
-                chapter_name = "默认章节"
-            
-            if chapter_name not in chapters:
-                chapters[chapter_name] = []
-            
-            # 读取图片数据（使用原始文件名）
-            image_data = zip_ref.read(file_info.filename)
-            chapters[chapter_name].append((fixed_filename, image_data))
-    
-    # 对每个章节的图片进行排序
-    for chapter_name in chapters:
-        chapters[chapter_name].sort(key=lambda x: natural_sort_key(x[0]))
-    
-    return chapters
+    chapter_entries = get_chapter_entries_from_zip(zip_path)
+    return {
+        chapter_name: read_images_from_zip(zip_path, entries)
+        for chapter_name, entries in chapter_entries.items()
+    }
 
 
 def extract_chapter_name(zip_filename: str) -> str:
@@ -400,6 +418,109 @@ def create_image_cover_page(c: canvas.Canvas, title: str, image_data: bytes, pag
         create_title_page(c, title, page_width, page_height)
 
 
+def calculate_page_dimensions(img_width: int, img_height: int,
+                              page_width: float, page_height: float) -> Tuple[float, float]:
+    """
+    根据图片宽高比计算适配页面后的实际绘制尺寸。
+    """
+    img_aspect_ratio = img_width / img_height
+    page_aspect_ratio = page_width / page_height
+
+    if img_aspect_ratio > page_aspect_ratio:
+        actual_width = page_width
+        actual_height = page_width / img_aspect_ratio
+    else:
+        actual_height = page_height
+        actual_width = page_height * img_aspect_ratio
+
+    return actual_width, actual_height
+
+
+def get_preprocess_worker_count(image_count: int) -> int:
+    """
+    计算图片预处理的并行进程数。
+
+    可通过环境变量 `COMICPACKER_PREPROCESS_WORKERS` 覆盖：
+    - 未设置: 自动选择，最多 4 个进程
+    - 1: 强制串行
+    - >1: 使用指定数量（受图片数量限制）
+    """
+    if image_count <= 1:
+        return 1
+
+    configured_workers = os.getenv('COMICPACKER_PREPROCESS_WORKERS', '').strip()
+    if configured_workers:
+        try:
+            parsed_workers = int(configured_workers)
+        except ValueError:
+            print(f"  ⚠ 忽略无效的 COMICPACKER_PREPROCESS_WORKERS={configured_workers!r}，回退自动并行度")
+        else:
+            return max(1, min(parsed_workers, image_count))
+
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(cpu_count, 4, image_count))
+
+
+def get_preprocess_chunk_size(image_count: int) -> int:
+    """
+    计算单次读入/预处理的图片块大小。
+
+    可通过环境变量 `COMICPACKER_PREPROCESS_CHUNK_SIZE` 覆盖，默认 32。
+    """
+    if image_count <= 0:
+        return 1
+
+    configured_chunk_size = os.getenv('COMICPACKER_PREPROCESS_CHUNK_SIZE', '').strip()
+    if configured_chunk_size:
+        try:
+            parsed_chunk_size = int(configured_chunk_size)
+        except ValueError:
+            print(f"  ⚠ 忽略无效的 COMICPACKER_PREPROCESS_CHUNK_SIZE={configured_chunk_size!r}，回退默认分块大小")
+        else:
+            return max(1, min(parsed_chunk_size, image_count))
+
+    return min(32, image_count)
+
+
+def should_parallelize_preprocess(images, page_width: float, page_height: float,
+                                  worker_count: int, sample_size: int = 12) -> bool:
+    """
+    根据前若干张图片的元数据粗略判断并行化是否值得。
+
+    经验规则：
+    - 如果样本里几乎都是“无需缩放、无需转码的 RGB JPEG”，串行路径更快
+    - 如果样本中存在较多需要缩放/转码的页面，再启用多进程以利用多核
+    """
+    if worker_count <= 1 or len(images) < 8:
+        return False
+
+    expensive_count = 0
+    inspected = 0
+
+    for _, img_data in images[:sample_size]:
+        try:
+            img = Image.open(io.BytesIO(img_data))
+            actual_width, actual_height = calculate_page_dimensions(
+                img.size[0],
+                img.size[1],
+                page_width,
+                page_height
+            )
+            max_dimension = max(actual_width, actual_height)
+            needs_resize = img.size[0] > max_dimension * 1.5 or img.size[1] > max_dimension * 1.5
+            is_fast_path_jpeg = not needs_resize and img.format == 'JPEG' and img.mode == 'RGB'
+            if not is_fast_path_jpeg:
+                expensive_count += 1
+            inspected += 1
+        except Exception:
+            return True
+
+    if inspected == 0:
+        return False
+
+    return expensive_count >= max(1, inspected // 4)
+
+
 def preprocess_image(args):
     """
     预处理单张图片（在独立进程中执行）
@@ -424,20 +545,29 @@ def preprocess_image(args):
         img_width, img_height = img.size
         
         # 计算目标尺寸
-        img_aspect_ratio = img_width / img_height
-        page_aspect_ratio = page_width / page_height
-        
-        if img_aspect_ratio > page_aspect_ratio:
-            actual_width = page_width
-            actual_height = page_width / img_aspect_ratio
-        else:
-            actual_height = page_height
-            actual_width = page_height * img_aspect_ratio
+        actual_width, actual_height = calculate_page_dimensions(
+            img_width,
+            img_height,
+            page_width,
+            page_height
+        )
         
         # 如果图片过大，调整大小以节省内存
         max_dimension = max(actual_width, actual_height)
-        if img_width > max_dimension * 1.5 or img_height > max_dimension * 1.5:
+        needs_resize = img_width > max_dimension * 1.5 or img_height > max_dimension * 1.5
+        if needs_resize:
             img = img.resize((int(actual_width), int(actual_height)), Image.LANCZOS)
+
+        # 对于无需缩放/转码的 RGB JPEG，直接复用原始字节，避免重复 JPEG 编码。
+        # 真实漫画样本大多属于这一类，能显著降低 PDF 生成阶段的 CPU 消耗。
+        if not needs_resize and img.format == 'JPEG' and img.mode == 'RGB':
+            return {
+                'data': img_data,
+                'width': actual_width,
+                'height': actual_height,
+                'name': img_name,
+                'error': None
+            }
         
         # 保存为优化的 JPEG
         output = io.BytesIO()
@@ -490,7 +620,13 @@ def preprocess_images(images, page_width, page_height, show_progress=True):
     args_list = [(img_data, page_width, page_height, img_name) 
                  for img_name, img_data in images]
     
-    print(f"  预处理 {len(images)} 张图片...")
+    worker_count = get_preprocess_worker_count(len(images))
+    use_parallel = should_parallelize_preprocess(images, page_width, page_height, worker_count)
+
+    if use_parallel:
+        print(f"  预处理 {len(images)} 张图片... (并行进程: {worker_count})")
+    else:
+        print(f"  预处理 {len(images)} 张图片...")
     
     # 顺序处理
     try:
@@ -504,12 +640,21 @@ def preprocess_images(images, page_width, page_height, show_progress=True):
         else:
             use_tqdm = False
         
-        results = []
-        iterator = tqdm(args_list, desc="  预处理进度") if use_tqdm else args_list
-        
-        for args in iterator:
-            result = preprocess_image(args)
-            results.append(result)
+        if use_parallel:
+            try:
+                chunk_size = max(1, len(args_list) // max(1, worker_count * 4))
+                with ProcessPoolExecutor(max_workers=worker_count) as executor:
+                    iterator = executor.map(preprocess_image, args_list, chunksize=chunk_size)
+                    if use_tqdm:
+                        iterator = tqdm(iterator, total=len(args_list), desc="  预处理进度")
+                    results = list(iterator)
+            except Exception as parallel_error:
+                print(f"  ⚠ 并行预处理失败，回退串行模式: {parallel_error}")
+                iterator = tqdm(args_list, desc="  预处理进度") if use_tqdm else args_list
+                results = [preprocess_image(args) for args in iterator]
+        else:
+            iterator = tqdm(args_list, desc="  预处理进度") if use_tqdm else args_list
+            results = [preprocess_image(args) for args in iterator]
         
         # 检查错误
         errors = [r for r in results if r['error']]
@@ -595,6 +740,21 @@ def add_image_to_pdf(c: canvas.Canvas, image_data: bytes, page_width: float, pag
         print(f"警告: 无法处理图片 - {e}")
 
 
+def draw_preprocessed_image(c: canvas.Canvas, img_info: dict, bookmark_title: Optional[str] = None):
+    """
+    将预处理后的图片信息绘制到 PDF。
+    """
+    c.setPageSize((img_info['width'], img_info['height']))
+
+    if bookmark_title:
+        c.bookmarkPage(bookmark_title)
+        c.addOutlineEntry(bookmark_title, bookmark_title, level=0)
+
+    img_reader = ImageReader(io.BytesIO(img_info['data']))
+    c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
+    c.showPage()
+
+
 def create_pdf_from_chapters(zip_files: List[str], folder_path: str, 
                             output_filename: str, batch_number: int, output_folder: str = './output'):
     """
@@ -605,9 +765,8 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
     print(f"\n创建PDF: {output_filename}")
     print(f"包含章节: {', '.join([extract_chapter_name(z) for z in zip_files])}")
     
-    # 第一步：收集所有图片和章节信息
-    all_images = []
-    chapter_markers = []  # 记录每个章节的起始位置
+    print(f"  组装PDF...")
+    c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
     
     for zip_file in zip_files:
         zip_path = os.path.join(folder_path, zip_file)
@@ -615,54 +774,46 @@ def create_pdf_from_chapters(zip_files: List[str], folder_path: str,
         
         print(f"  读取章节: {chapter_name}")
         
-        # 获取章节中的所有图片
-        images = get_images_from_zip(zip_path)
-        print(f"    找到 {len(images)} 张图片")
-        
-        # 记录章节标记（在所有图片列表中的位置）
-        chapter_markers.append({
-            'name': chapter_name,
-            'start_index': len(all_images)
-        })
-        
-        all_images.extend(images)
-    
-    # 第二步：预处理所有图片
-    if all_images:
-        preprocessed_images = preprocess_images(all_images, page_width, page_height)
-    else:
-        preprocessed_images = []
-    
-    # 第三步：顺序组装PDF
-    print(f"  组装PDF...")
-    c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
-    
-    current_img_index = 0
-    for chapter_info in chapter_markers:
-        chapter_name = chapter_info['name']
-        
-        # 计算这个章节有多少张图片
-        next_chapter_start = chapter_markers[chapter_markers.index(chapter_info) + 1]['start_index'] \
-                            if chapter_markers.index(chapter_info) + 1 < len(chapter_markers) \
-                            else len(preprocessed_images)
-        
-        # 添加这个章节的所有图片
-        while current_img_index < next_chapter_start and current_img_index < len(preprocessed_images):
-            img_info = preprocessed_images[current_img_index]
-            
-            # 设置页面大小
-            c.setPageSize((img_info['width'], img_info['height']))
-            
-            # 绘制图片
-            img_reader = ImageReader(io.BytesIO(img_info['data']))
-            c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
-            c.showPage()
-            
-            current_img_index += 1
-    
+        image_entries = get_image_entries_from_zip(zip_path)
+        print(f"    找到 {len(image_entries)} 张图片")
+
+        if not image_entries:
+            continue
+
+        images = read_images_from_zip(zip_path, image_entries)
+        preprocessed_images = preprocess_images(images, page_width, page_height)
+        for img_info in preprocessed_images:
+            draw_preprocessed_image(c, img_info)
+
     c.save()
     print(f"✓ PDF创建完成: {output_filename}")
     print(f"  已添加 {len(zip_files)} 个章节书签")
+
+
+def process_chapter_into_canvas(c: canvas.Canvas, zip_path: str,
+                                image_entries: List[Tuple[str, str]],
+                                bookmark_title: Optional[str] = None) -> int:
+    """
+    读取、预处理并写入单个章节/图片块到 PDF。
+    返回成功写入的页数。
+    """
+    if not image_entries:
+        return 0
+
+    written_pages = 0
+    chunk_size = get_preprocess_chunk_size(len(image_entries))
+
+    for start_index in range(0, len(image_entries), chunk_size):
+        chunk_entries = image_entries[start_index:start_index + chunk_size]
+        images = read_images_from_zip(zip_path, chunk_entries)
+        preprocessed_images = preprocess_images(images, page_width, page_height)
+
+        for page_index, img_info in enumerate(preprocessed_images):
+            use_bookmark = bookmark_title if written_pages == 0 and page_index == 0 else None
+            draw_preprocessed_image(c, img_info, bookmark_title=use_bookmark)
+            written_pages += 1
+
+    return written_pages
 
 
 def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: str = './output',
@@ -688,7 +839,6 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         comic_name=comic_name,
         fallback_name=pdf_prefix
     )
-    effective_prefix = pdf_prefix or (comic_name or resolved_comic_name)
     effective_prefix = pdf_prefix or (comic_name or resolved_comic_name)
     effective_comic_name = comic_name or resolved_comic_name
 
@@ -726,14 +876,14 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
                             f'处理书籍 {book_idx}/{len(zip_files)}: {book_name}')
         
         # 从ZIP中提取章节
-        chapters = get_chapters_from_zip(zip_path)
+        chapter_entries = get_chapter_entries_from_zip(zip_path)
         
-        if not chapters:
+        if not chapter_entries:
             print(f"  警告: {zip_file} 中没有找到图片，跳过")
             continue
         
         # 对章节名进行排序
-        sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
+        sorted_chapter_names = sorted(chapter_entries.keys(), key=natural_sort_key)
         
         print(f"  找到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names)}")
         
@@ -751,82 +901,19 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         c.setTitle(title)
         c.setAuthor("Comic Packer")
         c.setSubject("Comic Book")
-        book_title = normalized_book_name if effective_comic_name else book_name
         
-        # 2. 收集所有章节的图片
-        all_images = []
-        chapter_info_list = []  # 记录每个章节的信息
+        # 2. 按章节增量处理，避免整卷图片与预处理结果同时常驻内存
+        total_images = 0
         
         for chapter_name in sorted_chapter_names:
-            chapter_images = chapters[chapter_name]
+            image_entries = chapter_entries[chapter_name]
             
-            if not chapter_images:
+            if not image_entries:
                 print(f"    警告: 章节 {chapter_name} 没有图片，跳过")
                 continue
             
-            print(f"    读取章节: {chapter_name} ({len(chapter_images)} 张图片)")
-            
-            # 记录章节信息
-            chapter_info_list.append({
-                'name': chapter_name,
-                'start_index': len(all_images),
-                'image_count': len(chapter_images)
-            })
-            
-            all_images.extend(chapter_images)
-        
-        # 3. 预处理所有图片
-        if all_images:
-            preprocessed_images = preprocess_images(all_images, page_width, page_height)
-        else:
-            preprocessed_images = []
-        
-        # 4. 顺序组装PDF
-        print(f"  组装PDF...")
-        current_img_index = 0
-        total_images = 0
-        
-        for chapter_info in chapter_info_list:
-            chapter_name = chapter_info['name']
-            
-            # 计算这个章节的图片范围
-            next_chapter_start = chapter_info_list[chapter_info_list.index(chapter_info) + 1]['start_index'] \
-                                if chapter_info_list.index(chapter_info) + 1 < len(chapter_info_list) \
-                                else len(preprocessed_images)
-            
-            # 添加第一张图片（带章节标题书签）
-            if current_img_index < len(preprocessed_images):
-                img_info = preprocessed_images[current_img_index]
-                
-                # 设置页面大小
-                c.setPageSize((img_info['width'], img_info['height']))
-                
-                # 添加书签
-                c.bookmarkPage(chapter_name)
-                c.addOutlineEntry(chapter_name, chapter_name, level=0)
-                
-                # 绘制图片
-                img_reader = ImageReader(io.BytesIO(img_info['data']))
-                c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
-                c.showPage()
-                
-                current_img_index += 1
-                total_images += 1
-            
-            # 添加后续图片（不带标题）
-            while current_img_index < next_chapter_start and current_img_index < len(preprocessed_images):
-                img_info = preprocessed_images[current_img_index]
-                
-                # 设置页面大小
-                c.setPageSize((img_info['width'], img_info['height']))
-                
-                # 绘制图片
-                img_reader = ImageReader(io.BytesIO(img_info['data']))
-                c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
-                c.showPage()
-                
-                current_img_index += 1
-                total_images += 1
+            print(f"    读取章节: {chapter_name} ({len(image_entries)} 张图片)")
+            total_images += process_chapter_into_canvas(c, zip_path, image_entries, bookmark_title=chapter_name)
         
         # 保存PDF
         c.save()
@@ -876,6 +963,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         comic_name=comic_name,
         fallback_name=pdf_prefix
     )
+    effective_prefix = pdf_prefix or (comic_name or resolved_comic_name)
     
     # 获取所有ZIP文件并排序
     zip_files = get_sorted_zip_files(folder_path)
@@ -1008,32 +1096,32 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
         
         try:
             # 尝试按章节提取图片（检测文件夹结构）
-            chapters = get_chapters_from_zip(cbz_path)
+            chapter_entries = get_chapter_entries_from_zip(cbz_path)
             
-            if not chapters:
+            if not chapter_entries:
                 print(f"  ⚠ 警告: {cbz_file} 中没有找到图片，跳过")
                 continue
             
             # 检查是否有真正的章节结构（多个文件夹或非"默认章节"）
-            has_chapters = len(chapters) > 1 or (len(chapters) == 1 and "默认章节" not in chapters)
+            has_chapters = len(chapter_entries) > 1 or (len(chapter_entries) == 1 and "默认章节" not in chapter_entries)
             
             if has_chapters:
                 # 对章节名进行排序
-                sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
+                sorted_chapter_names = sorted(chapter_entries.keys(), key=natural_sort_key)
                 print(f"  检测到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names[:3])}{'...' if len(sorted_chapter_names) > 3 else ''}")
             else:
                 print(f"  未检测到章节结构，作为单一文档处理")
             
             # 统计总图片数
-            total_images = sum(len(imgs) for imgs in chapters.values())
+            total_images = sum(len(entries) for entries in chapter_entries.values())
             print(f"  找到 {total_images} 张图片")
             
             # 获取第一张图片作为封面
             if has_chapters:
-                first_chapter_name = sorted(chapters.keys(), key=natural_sort_key)[0]
-                first_image_data = chapters[first_chapter_name][0][1]
+                first_chapter_name = sorted(chapter_entries.keys(), key=natural_sort_key)[0]
+                first_image_data = read_single_image_from_zip(cbz_path, chapter_entries[first_chapter_name][0][1])
             else:
-                first_image_data = list(chapters.values())[0][0][1]
+                first_image_data = read_single_image_from_zip(cbz_path, list(chapter_entries.values())[0][0][1])
             
             # 使用第一张图片的尺寸作为PDF页面大小（用于封面）
             first_img = Image.open(io.BytesIO(first_image_data))
@@ -1059,79 +1147,28 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
             
             
             if has_chapters:
-                # 有章节结构：收集所有图片（跳过第一章的第一张，已作为封面）
-                sorted_chapter_names = sorted(chapters.keys(), key=natural_sort_key)
-                
-                all_images = []
-                chapter_bookmarks = []  # 记录需要添加书签的位置
-                
+                # 有章节结构：按章节增量处理（跳过第一章的第一张，已作为封面）
+                sorted_chapter_names = sorted(chapter_entries.keys(), key=natural_sort_key)
+
                 for chapter_idx, chapter_name in enumerate(sorted_chapter_names, 1):
-                    chapter_images = chapters[chapter_name]
-                    
-                    for img_idx, (img_name, img_data) in enumerate(chapter_images):
-                        # 跳过第一章的第一张图片（已作为封面）
-                        if chapter_idx == 1 and img_idx == 0:
-                            continue
-                        
-                        # 如果是章节的第一张图片，记录书签位置
-                        if img_idx == 0:
-                            chapter_bookmarks.append({
-                                'index': len(all_images),
-                                'name': chapter_name
-                            })
-                        
-                        all_images.append((img_name, img_data))
-                
-                # 预处理所有图片
-                if all_images:
-                    print(f"  预处理 {len(all_images)} 张图片...")
-                    preprocessed_images = preprocess_images(all_images, page_width, page_height)
-                else:
-                    preprocessed_images = []
-                
-                # 顺序组装PDF
-                print(f"  组装PDF...")
-                for idx, img_info in enumerate(preprocessed_images):
-                    # 检查是否需要添加书签
-                    for bookmark in chapter_bookmarks:
-                        if bookmark['index'] == idx:
-                            c.bookmarkPage(bookmark['name'])
-                            c.addOutlineEntry(bookmark['name'], bookmark['name'], level=0)
-                            break
-                    
-                    # 设置页面大小
-                    c.setPageSize((img_info['width'], img_info['height']))
-                    
-                    # 绘制图片
-                    img_reader = ImageReader(io.BytesIO(img_info['data']))
-                    c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
-                    c.showPage()
+                    image_entries = chapter_entries[chapter_name]
+                    if chapter_idx == 1:
+                        image_entries = image_entries[1:]
+
+                    if not image_entries:
+                        continue
+
+                    bookmark_title = chapter_name if chapter_idx > 1 else None
+                    process_chapter_into_canvas(c, cbz_path, image_entries, bookmark_title=bookmark_title)
                 
                 print(f"  ✓ 已添加 {len(sorted_chapter_names)} 个章节书签")
             else:
                 # 无章节结构：直接处理所有图片（跳过第一张，已作为封面）
-                all_images = list(chapters.values())[0]
+                all_image_entries = list(chapter_entries.values())[0]
                 
                 # 收集除封面外的所有图片
-                images_to_process = all_images[1:]
-                
-                # 预处理所有图片
-                if images_to_process:
-                    print(f"  预处理 {len(images_to_process)} 张图片...")
-                    preprocessed_images = preprocess_images(images_to_process, page_width, page_height)
-                else:
-                    preprocessed_images = []
-                
-                # 顺序组装PDF
-                print(f"  组装PDF...")
-                for img_info in preprocessed_images:
-                    # 设置页面大小
-                    c.setPageSize((img_info['width'], img_info['height']))
-                    
-                    # 绘制图片
-                    img_reader = ImageReader(io.BytesIO(img_info['data']))
-                    c.drawImage(img_reader, 0, 0, width=img_info['width'], height=img_info['height'])
-                    c.showPage()
+                image_entries_to_process = all_image_entries[1:]
+                process_chapter_into_canvas(c, cbz_path, image_entries_to_process)
             
             c.save()
             success_count += 1
