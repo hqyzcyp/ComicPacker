@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, send_file
 from flask_cors import CORS
 import uuid
 
@@ -25,6 +25,7 @@ from main import (
     pack_comics_to_pdf,
     pack_comics_by_book,
     convert_cbz_to_pdf,
+    convert_pdf_folder_to_mobi,
     natural_sort_key,
     extract_volume_number,
     sanitize_output_component
@@ -40,13 +41,17 @@ jobs_lock = threading.Lock()
 cancelled_jobs = set()  # 跟踪被取消的任务
 console_output = []  # 存储最新的控制台输出
 console_output_lock = threading.Lock()
+config_lock = threading.Lock()
 MAX_CONSOLE_LINES = 20  # 最多保留20行输出
 COMIC_FILE_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
-CONVERTIBLE_COMIC_EXTENSIONS = {'.zip', '.cbz'}
+CONVERTIBLE_COMIC_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
+DOWNLOADABLE_FILE_EXTENSIONS = COMIC_FILE_EXTENSIONS | {'.mobi', '.epub'}
 FOLDER_METADATA_BLACKLIST = {
     '完结', '未完', '连载中', '已完结', '未完结', '电子版', '掃圖', '扫图', '生肉',
     '熟肉', 'pdf', 'zip', 'cbz', 'bili', '哔哩哔哩', '合集', '单行本'
 }
+CONFIG_PATH = Path(__file__).with_name('config.toml')
+BROWSE_ROOT = Path('/mnt').resolve()
 
 
 def configure_server_logging():
@@ -61,6 +66,159 @@ def configure_server_logging():
         flask.cli.show_server_banner = lambda *args, **kwargs: None
     except Exception:
         pass
+
+
+def is_allowed_path(path: Path) -> bool:
+    """判断路径是否位于允许访问的 /mnt/ 范围内。"""
+    return path == BROWSE_ROOT or BROWSE_ROOT in path.parents
+
+
+def resolve_allowed_path(path_value: str, require_exists: bool = True,
+                         require_dir: bool = False,
+                         require_file: bool = False) -> Path:
+    """解析并校验路径，限制只能访问 /mnt/ 下的文件。"""
+    if not path_value:
+        raise ValueError('路径不能为空')
+
+    raw_path = Path(path_value).expanduser()
+    candidate = (BROWSE_ROOT / raw_path).resolve(strict=False) if not raw_path.is_absolute() else raw_path.resolve(strict=False)
+
+    if not is_allowed_path(candidate):
+        raise PermissionError('只允许访问 /mnt/ 下的文件')
+
+    if require_exists and not candidate.exists():
+        raise FileNotFoundError('路径不存在')
+
+    if candidate.exists():
+        if require_dir and not candidate.is_dir():
+            raise NotADirectoryError('不是目录')
+        if require_file and not candidate.is_file():
+            raise IsADirectoryError('不是文件')
+
+    return candidate
+
+
+def get_default_comic_folder() -> Path:
+    """获取默认漫画目录，优先使用常见样本目录。"""
+    candidates = [
+        Path('/mnt/data/down/comic'),
+        BROWSE_ROOT
+    ]
+
+    for candidate in candidates:
+        try:
+            resolved = resolve_allowed_path(str(candidate), require_exists=True, require_dir=True)
+            return resolved
+        except Exception:
+            continue
+
+    return BROWSE_ROOT
+
+
+def derive_output_folder_from_comic_folder(comic_folder: str) -> Path:
+    """根据漫画目录生成默认输出目录：上一级目录下的 comic_output。"""
+    comic_path = resolve_allowed_path(comic_folder, require_exists=True, require_dir=True)
+    parent_dir = comic_path.parent
+
+    if not is_allowed_path(parent_dir):
+        parent_dir = BROWSE_ROOT
+
+    output_dir = (parent_dir / 'comic_output').resolve(strict=False)
+    if not is_allowed_path(output_dir):
+        output_dir = BROWSE_ROOT / 'comic_output'
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def parse_simple_toml(content: str) -> dict:
+    """解析当前项目所需的最小 TOML 子集（仅 key = \"value\"）。"""
+    result = {}
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or line.startswith('['):
+            continue
+        if '=' not in line:
+            continue
+
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+
+        if not key:
+            continue
+
+        if value.startswith('"') and value.endswith('"'):
+            try:
+                result[key] = json.loads(value)
+            except json.JSONDecodeError:
+                result[key] = value.strip('"')
+        else:
+            result[key] = value.strip().strip('"').strip("'")
+
+    return result
+
+
+def write_app_config(config: dict):
+    """将当前 Web 配置写入 config.toml。"""
+    content = '\n'.join([
+        '# ComicPacker Web configuration',
+        f'comic_folder = {json.dumps(config["comic_folder"], ensure_ascii=False)}',
+        f'output_folder = {json.dumps(config["output_folder"], ensure_ascii=False)}',
+        ''
+    ])
+    CONFIG_PATH.write_text(content, encoding='utf-8')
+
+
+def load_app_config() -> dict:
+    """读取并规范化 Web 配置；若不存在则自动创建。"""
+    with config_lock:
+        default_comic_folder = get_default_comic_folder()
+        default_output_folder = derive_output_folder_from_comic_folder(str(default_comic_folder))
+
+        config = {
+            'comic_folder': str(default_comic_folder),
+            'output_folder': str(default_output_folder)
+        }
+
+        if CONFIG_PATH.exists():
+            parsed = parse_simple_toml(CONFIG_PATH.read_text(encoding='utf-8'))
+            for key in ('comic_folder', 'output_folder'):
+                if parsed.get(key):
+                    config[key] = parsed[key]
+
+        try:
+            config['comic_folder'] = str(
+                resolve_allowed_path(config['comic_folder'], require_exists=True, require_dir=True)
+            )
+        except Exception:
+            config['comic_folder'] = str(default_comic_folder)
+
+        try:
+            output_path = resolve_allowed_path(config['output_folder'], require_exists=False)
+            if output_path.exists() and not output_path.is_dir():
+                raise NotADirectoryError('输出路径不是目录')
+            output_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            output_path = derive_output_folder_from_comic_folder(config['comic_folder'])
+
+        config['output_folder'] = str(output_path)
+        write_app_config(config)
+        return config
+
+
+def update_default_paths(comic_folder: str) -> dict:
+    """更新默认漫画目录，并同步输出目录到上一级的 comic_output。"""
+    with config_lock:
+        comic_path = resolve_allowed_path(comic_folder, require_exists=True, require_dir=True)
+        output_path = derive_output_folder_from_comic_folder(str(comic_path))
+        config = {
+            'comic_folder': str(comic_path),
+            'output_folder': str(output_path)
+        }
+        write_app_config(config)
+        return config
 
 
 def list_comic_files(folder_path: str, extensions: Optional[set] = None) -> List[str]:
@@ -141,9 +299,8 @@ def build_output_preview(comic_name: str, sample_volume: Optional[str]) -> str:
 
 
 def build_suggested_output_dir(comic_name: str) -> str:
-    """根据漫画名生成更规范的输出目录。"""
-    safe_title = sanitize_output_component(comic_name)
-    return f"./output/{safe_title}" if safe_title else "./output"
+    """输出目录现在是根目录语义，默认建议保持在 ./output。"""
+    return "./output"
 
 
 def analyze_comic_folder(folder_path: str) -> dict:
@@ -313,7 +470,8 @@ def worker_thread():
                         output_folder=params.get('output', './output'),
                         convert_to_mobi=params.get('convert_to_mobi', False),
                         kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update
+                        progress_callback=tracker.update,
+                        comic_name=comic_name
                     )
                 elif mode == 'book':
                     pack_comics_by_book_with_progress(
@@ -335,17 +493,40 @@ def worker_thread():
                         progress_callback=tracker.update,
                         comic_name=comic_name
                     )
+                elif mode == 'pdf':
+                    convert_pdf_folder_to_mobi_with_progress(
+                        folder_path=params['folder'],
+                        output_folder=params.get('output', './output'),
+                        kindle_profile=params.get('kindle_profile', 'KPW5'),
+                        progress_callback=tracker.update,
+                        comic_name=comic_name
+                    )
                 
                 # 任务完成
-                print(f"[WORKER] Job {job_id} completed successfully")
+                print(f"[WORKER] Job {job_id} completed successfully with verified outputs")
                 with jobs_lock:
-                    # main.py已经通过progress_callback调用了completed状态
-                    # 这里只需要确保status被设置（如果main.py没有设置的话）
+                    progress = jobs[job_id].get('progress', {})
+                    if progress.get('stage') != 'completed':
+                        current = progress.get('current', 0)
+                        total = progress.get('total', current)
+                        jobs[job_id]['progress'] = {
+                            'stage': 'completed',
+                            'current': current,
+                            'total': total,
+                            'message': '任务已完成，输出文件已写入目标目录',
+                            'percentage': 100
+                        }
+                    else:
+                        jobs[job_id]['progress']['percentage'] = 100
+                        jobs[job_id]['progress']['message'] = (
+                            jobs[job_id]['progress'].get('message')
+                            or '任务已完成，输出文件已写入目标目录'
+                        )
+
                     if jobs[job_id]['status'] != 'completed':
                         jobs[job_id]['status'] = 'completed'
                     jobs[job_id]['end_time'] = datetime.now().isoformat()
-                    if 'percentage' in jobs[job_id]['progress']:
-                        jobs[job_id]['progress']['percentage'] = 100
+                    jobs[job_id]['last_update'] = datetime.now().isoformat()
                     
             except Exception as e:
                 # 检查是否是取消异常
@@ -370,11 +551,12 @@ def worker_thread():
                     print(f"[WORKER] Job {job_id} failed with error: {e}")
                     import traceback
                     traceback.print_exc()
+                    failure_message = f'转换失败: {str(e)}'
                     with jobs_lock:
                         jobs[job_id]['status'] = 'failed'
                         jobs[job_id]['end_time'] = datetime.now().isoformat()
                         jobs[job_id]['error'] = str(e)
-                        tracker.update('error', 0, 100, f'转换失败: {str(e)}')
+                    tracker.update('error', 0, 100, failure_message)
             
             finally:
                 # 恢复原始stdout
@@ -397,10 +579,12 @@ worker.start()
 def pack_comics_to_pdf_with_progress(folder_path: str, batch_size: int = 10, 
                                      pdf_prefix: str = "", output_folder: str = './output',
                                      convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
-                                     progress_callback: Optional[Callable] = None):
+                                     progress_callback: Optional[Callable] = None,
+                                     comic_name: str = ""):
     """批次模式转换（带进度回调）"""
     pack_comics_to_pdf(folder_path, batch_size, pdf_prefix, output_folder,
-                      convert_to_mobi, kindle_profile, progress_callback)
+                      convert_to_mobi, kindle_profile, progress_callback,
+                      comic_name=comic_name)
 
 
 def pack_comics_by_book_with_progress(folder_path: str, pdf_prefix: str = "",
@@ -428,6 +612,21 @@ def convert_cbz_to_pdf_with_progress(folder_path: str, cbz_prefix: str = "",
                         comic_name=comic_name)
 
 
+def convert_pdf_folder_to_mobi_with_progress(folder_path: str,
+                                             output_folder: str = './output',
+                                             kindle_profile: str = 'KPW5',
+                                             progress_callback: Optional[Callable] = None,
+                                             comic_name: str = ""):
+    """PDF转MOBI模式（带进度回调）"""
+    convert_pdf_folder_to_mobi(
+        folder_path,
+        output_folder,
+        kindle_profile,
+        progress_callback,
+        comic_name=comic_name
+    )
+
+
 # ============= API路由 =============
 
 @app.route('/')
@@ -436,29 +635,55 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/api/config', methods=['GET'])
+def get_config():
+    """获取 Web 配置。"""
+    try:
+        config = load_app_config()
+        return jsonify({
+            **config,
+            'browse_root': str(BROWSE_ROOT)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/default-path', methods=['POST'])
+def update_default_path():
+    """更新默认漫画目录，并同步输出目录。"""
+    try:
+        data = request.json or {}
+        config = update_default_paths(data.get('path'))
+        return jsonify({
+            **config,
+            'browse_root': str(BROWSE_ROOT)
+        })
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except (FileNotFoundError, NotADirectoryError, ValueError) as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/browse', methods=['POST'])
 def browse_files():
     """浏览服务器文件系统"""
     try:
-        data = request.json
-        #todo need fix to set default path
-        path = data.get('path', '/vol2/1000/qb/down/comic/')
-        
-        # 安全检查：防止访问系统敏感目录
-        abs_path = os.path.abspath(path)
-        
-        if not os.path.exists(abs_path):
-            return jsonify({'error': '路径不存在'}), 404
-        
-        if not os.path.isdir(abs_path):
-            return jsonify({'error': '不是目录'}), 400
+        data = request.json or {}
+        config = load_app_config()
+        abs_path = resolve_allowed_path(
+            data.get('path') or config['comic_folder'],
+            require_exists=True,
+            require_dir=True
+        )
         
         # 列出目录内容
         items = []
         try:
             for item in sorted(os.listdir(abs_path), key=natural_sort_key):
-                item_path = os.path.join(abs_path, item)
-                is_dir = os.path.isdir(item_path)
+                item_path = abs_path / item
+                is_dir = item_path.is_dir()
                 
                 # 统计文件信息
                 file_count = 0
@@ -474,19 +699,53 @@ def browse_files():
                 
                 items.append({
                     'name': item,
-                    'path': item_path,
+                    'path': str(item_path),
                     'is_dir': is_dir,
-                    'file_count': file_count if is_dir else None
+                    'file_count': file_count if is_dir else None,
+                    'is_downloadable': (not is_dir and item_path.suffix.lower() in DOWNLOADABLE_FILE_EXTENSIONS)
                 })
         except PermissionError:
             return jsonify({'error': '没有权限访问此目录'}), 403
         
         return jsonify({
-            'path': abs_path,
-            'parent': str(Path(abs_path).parent) if abs_path != '/' else None,
+            'path': str(abs_path),
+            'parent': str(abs_path.parent) if abs_path != BROWSE_ROOT else None,
             'items': items
         })
-        
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': '路径不存在'}), 404
+    except NotADirectoryError:
+        return jsonify({'error': '不是目录'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/download', methods=['GET'])
+def download_file():
+    """下载 /mnt/ 下的漫画相关文件。"""
+    try:
+        file_path = resolve_allowed_path(
+            request.args.get('path', ''),
+            require_exists=True,
+            require_file=True
+        )
+
+        if file_path.suffix.lower() not in DOWNLOADABLE_FILE_EXTENSIONS:
+            return jsonify({'error': '该文件类型不支持下载'}), 400
+
+        return send_file(file_path, as_attachment=True, download_name=file_path.name)
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': '文件不存在'}), 404
+    except IsADirectoryError:
+        return jsonify({'error': '不是文件'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -495,20 +754,19 @@ def browse_files():
 def detect_mode():
     """检测文件夹内容并返回推荐的转换模式"""
     try:
-        data = request.json
-        folder_path = data.get('path')
-        
-        if not folder_path or not os.path.exists(folder_path):
-            return jsonify({'error': '路径不存在'}), 404
-        
-        if not os.path.isdir(folder_path):
-            return jsonify({'error': '不是目录'}), 400
+        data = request.json or {}
+        folder_path = resolve_allowed_path(
+            data.get('path'),
+            require_exists=True,
+            require_dir=True
+        )
         
         # 统计文件类型并读取命名分析
         cbz_count = 0
         zip_count = 0
+        pdf_count = 0
         vol_files_count = 0  # 统计以Vol开头的文件
-        folder_analysis = analyze_comic_folder(folder_path)
+        folder_analysis = analyze_comic_folder(str(folder_path))
         
         try:
             for item in os.listdir(folder_path):
@@ -522,6 +780,8 @@ def detect_mode():
                     cbz_count += 1
                 elif item_lower.endswith('.zip'):
                     zip_count += 1
+                elif item_lower.endswith('.pdf'):
+                    pdf_count += 1
         except PermissionError:
             return jsonify({'error': '没有权限访问此目录'}), 403
         
@@ -530,6 +790,8 @@ def detect_mode():
             recommended_mode = 'cbz'
         elif zip_count > 0:
             recommended_mode = 'book'
+        elif pdf_count > 0:
+            recommended_mode = 'pdf'
         else:
             recommended_mode = 'book'  # 默认
         
@@ -537,12 +799,20 @@ def detect_mode():
             'recommended_mode': recommended_mode,
             'cbz_count': cbz_count,
             'zip_count': zip_count,
-            'total_files': cbz_count + zip_count,
+            'pdf_count': pdf_count,
+            'total_files': cbz_count + zip_count + pdf_count,
             'has_vol_files': vol_files_count > 0,
             'vol_files_count': vol_files_count,
             **folder_analysis
         })
-        
+    except PermissionError as e:
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except FileNotFoundError:
+        return jsonify({'error': '路径不存在'}), 404
+    except NotADirectoryError:
+        return jsonify({'error': '不是目录'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -620,16 +890,15 @@ def clear_jobs():
 def create_job():
     """创建新的转换任务"""
     try:
-        params = request.json
+        params = request.json or {}
         
         # 验证参数
         if 'folder' not in params:
             print("[API] 创建任务失败: 缺少 folder 参数")
             return jsonify({'error': '缺少folder参数'}), 400
-        
-        if not os.path.exists(params['folder']):
-            print(f"[API] 创建任务失败: 文件夹不存在 - {params['folder']}")
-            return jsonify({'error': '文件夹不存在'}), 400
+
+        folder_path = resolve_allowed_path(params['folder'], require_exists=True, require_dir=True)
+        params['folder'] = str(folder_path)
 
         folder_analysis = analyze_comic_folder(params['folder'])
         comic_name = sanitize_output_component(params.get('comic_name', '').strip()) or folder_analysis.get('comic_name', '')
@@ -637,9 +906,17 @@ def create_job():
 
         if params.get('mode') == 'batch' and comic_name and not params.get('prefix'):
             params['prefix'] = comic_name
+        if params.get('mode') == 'pdf':
+            params['convert_to_mobi'] = True
 
         if not params.get('output'):
-            params['output'] = folder_analysis.get('suggested_output_dir', './output')
+            params['output'] = load_app_config().get('output_folder', str(derive_output_folder_from_comic_folder(params['folder'])))
+
+        output_path = resolve_allowed_path(params['output'], require_exists=False)
+        if output_path.exists() and not output_path.is_dir():
+            return jsonify({'error': '输出路径不是目录'}), 400
+        output_path.mkdir(parents=True, exist_ok=True)
+        params['output'] = str(output_path)
         
         # 创建任务
         job_id = str(uuid.uuid4())
@@ -673,7 +950,18 @@ def create_job():
             'job_id': job_id,
             'status': 'pending'
         })
-        
+    except PermissionError as e:
+        print(f"[API] 创建任务失败: {e}")
+        return jsonify({'error': str(e)}), 403
+    except ValueError as e:
+        print(f"[API] 创建任务失败: {e}")
+        return jsonify({'error': str(e)}), 400
+    except FileNotFoundError:
+        print(f"[API] 创建任务失败: 文件夹不存在 - {params.get('folder')}")
+        return jsonify({'error': '文件夹不存在'}), 400
+    except NotADirectoryError:
+        print(f"[API] 创建任务失败: 目录无效 - {params.get('folder')}")
+        return jsonify({'error': '不是目录'}), 400
     except Exception as e:
         print(f"[API] 创建任务时出错: {e}")
         import traceback
@@ -778,10 +1066,14 @@ def progress_stream(job_id):
 
 if __name__ == '__main__':
     configure_server_logging()
+    config = load_app_config()
     print("=" * 60)
     print("ComicPacker Web Server")
     print("=" * 60)
     print("服务器地址: http://localhost:5000")
+    print(f"漫画目录: {config['comic_folder']}")
+    print(f"输出目录: {config['output_folder']}")
+    print(f"浏览限制: {BROWSE_ROOT}/")
     print("按 Ctrl+C 停止服务器")
     print("=" * 60)
     

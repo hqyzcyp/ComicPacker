@@ -1,81 +1,61 @@
-# Task Plan: 收敛控制台弹窗剩余风险
+# Task Plan: 输出根目录重构 + PDF→MOBI 模式
 
 ## Goal
-在“弹窗日志功能已通过真实浏览器验证”的前提下，关闭剩余刷新机制风险，并避免为当前需求过度引入 SSE / WebSocket 复杂度。
+将“输出目录”重新定义为输出根目录：实际执行转换时，自动在根目录下创建以漫画名命名的文件夹，并在其中创建 `pdf/` 与 `mobi/` 子目录，把生成结果按格式分别落盘；同时新增 `pdf` 转换模式，用于检测目录中的 PDF 文件并批量转换为 MOBI。
 
 ## Current Phase
 Complete
 
 ## Phases
-### Phase 0: Context Recovery After /clear
+### Phase 0: Context Recovery
 - [x] 运行 session catchup：`python3 ~/.codex/skills/planning-with-files/scripts/session-catchup.py "$(pwd)"`
 - [x] 读取 `task_plan.md`、`findings.md`、`progress.md`
-- [x] 查看 `git diff --stat` 确认待验证变更仍在工作区
-- [x] 明确本轮目标是“验证 + 风险收敛”，不是重新实现功能
+- [x] 运行 `git diff --stat` / `git status --short` 了解当前工作区状态
+- [x] 确认 `omx explore` 在当前环境不可用（缺少 cargo），后续改走普通代码检查路径
 - **Status:** complete
 
-### Phase 1: Browser-level Validation
-- [x] 用户确认弹窗日志功能已在真实浏览器验证成功（2026-04-15）
-- [x] 弹窗打开/关闭、遮罩关闭、ESC 关闭、日志同步与滚动体验通过验证
+### Phase 1: Discovery & Design
+- [x] 定位 `main.py`、`web_server.py`、`static/app.js`、`templates/index.html` 中与输出目录、模式检测、任务创建有关的代码
+- [x] 确认当前行为：输出文件直接写入 `output`，推荐模式仅支持 `book/cbz/batch`
+- [x] 设计统一输出布局 helper 与 `pdf` 模式接入点
 - **Status:** complete
 
-### Phase 2: Failure Diagnosis if Needed
-- [x] 未触发；浏览器验证未报告异常，因此无需进入故障修复分支
-- **Status:** skipped
-
-### Phase 3: Log Refresh Strategy Review
-- [x] 评估当前需求的核心是“查看当前转换日志”，不是多客户端、亚秒级实时推送
-- [x] 决定本任务不升级到 SSE / WebSocket，避免为已验证通过的功能引入额外复杂度
-- [x] 通过前端自适应轮询关闭主要剩余风险：
-  - 活跃任务或弹窗打开时保持 1 秒刷新
-  - 页面可见但空闲时降为 4 秒刷新
-  - 页面隐藏时退避到 15 秒刷新
-  - 输出未变化时跳过重复 DOM 重绘
+### Phase 2: Implementation
+- [x] 调整后端输出目录布局：`<output_root>/<漫画名>/pdf` 与 `<output_root>/<漫画名>/mobi`
+- [x] 让 `book` / `batch` / `cbz` / `pdf` 模式都遵循统一输出布局
+- [x] 新增批量 `PDF -> MOBI` 转换函数与 Web worker 分支
+- [x] 更新模式检测、前端模式选项与相关提示文案
+- [x] 修正 CLI / README 中与输出目录或模式相关的说明
 - **Status:** complete
 
-### Phase 4: Verification & Delivery
+### Phase 3: Verification
+- [x] 运行 `python3 -m py_compile main.py web_server.py`
 - [x] 运行 `node --check static/app.js`
-- [x] 运行 `python3 -m py_compile web_server.py main.py`
-- [x] 更新 `task_plan.md`、`findings.md`、`progress.md`
-- [x] 汇总已关闭风险与后续观察项
+- [x] 用 Flask `test_client()` 验证 `/api/detect-mode` 可识别 PDF 模式
+- [x] 用真实 CBZ + smoke PDF 验证 `漫画名/pdf`、`漫画名/mobi` 结构以及 PDF→MOBI 落盘结果
+- [x] 运行 `conda run -n comic python main.py --help`，确认 CLI 新模式/参数已暴露
+- [x] 回写 `task_plan.md`、`findings.md`、`progress.md`
 - **Status:** complete
 
 ## Key Questions
-1. 当前弹窗功能在真实浏览器中的交互是否完全正常？
-2. 1 秒轮询对“查看当前转换日志”是否已经足够？
-3. 是否需要在本任务内引入更重的实时推送方案？
+1. 统一输出目录布局应由哪一层负责，才能覆盖 CLI 与 Web 两条路径？
+2. `pdf` 模式是“直接把现有 PDF 批量转成 MOBI”，还是仍受 `convert_to_mobi` 开关控制？
+3. 批次模式在启用新布局后，文件名与清理逻辑是否还需要保留旧行为？
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| 接受用户的真实浏览器验证结果，关闭交互风险 | 这是当前最关键且最接近真实使用的证据 |
-| 本任务不升级到 SSE / WebSocket | 当前需求已被验证满足，推送式改造复杂度和回归面明显更高 |
-| 通过“自适应轮询 + 变化检测”收敛剩余风险 | 可以降低空闲与后台页面开销，同时保持活跃转换时的实时性 |
-| 将“更高实时性”保留为未来独立优化项 | 只有在出现多客户端、亚秒级刷新、或更高吞吐需求时才值得推进 |
+| 输出参数改为“根目录”语义，最终落盘目录由 `main.py` 的统一 helper 派生 | 这样 CLI/Web 都复用同一规则，不必各自拼接漫画目录 |
+| `pdf` 模式直接执行 PDF→MOBI，不依赖额外勾选项决定是否转换 | 模式本身的职责就是生成 MOBI，避免 UI/后端语义冲突 |
+| `book/cbz` 在未显式传入漫画名时也会尽量根据文件名/文件夹名推断目录名 | 保证新输出结构默认可用，不强依赖手动输入 |
+| 删除 CLI 中“启用 MOBI 后清理 PDF”的旧尾处理 | 新需求要求保留 `pdf/` 与 `mobi/` 两类产物 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| 无 | - | - |
+| `omx explore` 无法运行（缺少 cargo） | 1 | 记录后退回普通 shell / 源码阅读路径 |
 
 ## Notes
-- 本轮风险收敛只修改了 `static/app.js` 与 planning files；弹窗结构和样式沿用已验证通过的版本。
-- 当前已无阻塞性交付风险；剩余仅为未来可能出现的“更高实时性需求”，不属于本任务必须项。
-
-
-## Session Addendum: MOBI 输出缺失分析（2026-04-15）
-- [x] 核对真实输出目录与全仓库 `.mobi/.epub` 文件
-- [x] 追踪 `main.py` 的 MOBI 创建日志来源与子进程模型
-- [x] 追踪 `web_server.py` worker 的完成时机与日志捕获边界
-- [x] 在 conda `comic` 环境下复现 KCC 失败
-- [x] 归纳根因与修复方向
-- **Status:** complete
-
-
-## Session Addendum: MOBI 修复与回填（2026-04-15）
-- [x] 将 MOBI 转换链路改为“真实执行 + 真实落盘校验”
-- [x] 修复 KCC 使用解释器与 kindlegen 可执行路径问题
-- [x] 让 MOBI 失败中断任务而不是伪成功
-- [x] 通过 smoke test 验证修复
-- [x] 将 `output/相反的你和我/` 现有 8 个 PDF 补转为 MOBI
-- **Status:** complete
+- `main.py` 现在负责统一创建输出结构；Web 前端只负责收集“输出根目录”。
+- 新增 `pdf` 模式后，Web 自动检测 PDF 文件夹并切换到 `PDF 转 MOBI`。
+- 验证期间使用了真实 `/mnt` 样本目录与临时目录组合，避免污染仓库输出目录。

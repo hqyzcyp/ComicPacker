@@ -54,9 +54,10 @@
                         <select id="mode" name="mode">
                             <option value="book">按书打包</option>
                             <option value="cbz">按CBZ打包</option>
+                            <option value="pdf">PDF 转 MOBI</option>
                             <option value="batch">按批次模式</option>
                         </select>
-                        <small class="help-text">批次模式: 固定章节数打包 | 按书: 自动检测分书 | CBZ: 每个CBZ一个PDF</small>
+                        <small class="help-text">批次模式: 固定章节数打包 | 按书: 自动检测分书 | CBZ: 每个CBZ一个PDF | PDF: 批量转MOBI</small>
                     </div>
 
                     <div class="form-group" id="batch-size-group" style="display: none;">
@@ -82,9 +83,10 @@
                     <div class="form-group">
                         <label for="output">输出目录:</label>
                         <input type="text" id="output" name="output" value="./output" placeholder="./output">
+                        <small class="help-text">这里填写输出根目录；实际结果会写入 <code>漫画名/pdf</code> 与 <code>漫画名/mobi</code> 子目录。</small>
                     </div>
 
-                    <div class="form-group checkbox-group">
+                    <div class="form-group checkbox-group" id="convert-to-mobi-group">
                         <label>
                             <input type="checkbox" id="convert-to-mobi" name="convert_to_mobi" checked>
                             转换为 MOBI 格式

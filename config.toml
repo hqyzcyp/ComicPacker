@@ -1,0 +1,3 @@
+# ComicPacker Web configuration
+comic_folder = "/mnt/data/down/comic"
+output_folder = "/mnt/data/down/comic_output"

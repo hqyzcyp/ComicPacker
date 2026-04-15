@@ -23,6 +23,10 @@ import io
 page_width, page_height = 1236, 1648
 
 INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
+FOLDER_METADATA_BLACKLIST = {
+    '完结', '未完', '连载中', '已完结', '未完结', '电子版', '掃圖', '扫图', '生肉',
+    '熟肉', 'pdf', 'zip', 'cbz', 'bili', '哔哩哔哩', '合集', '单行本'
+}
 
 def natural_sort_key(filename: str) -> List:
     """
@@ -65,6 +69,19 @@ def sanitize_output_component(value: str) -> str:
     return cleaned
 
 
+def extract_title_from_filename(file_stem: str) -> str:
+    """
+    从 `漫画名 Vol.xx` 风格文件名中提取漫画名。
+    """
+    match = re.search(r'(?i)\bvol(?:ume)?[.\s_-]*\d+\b', file_stem or '')
+    if not match:
+        return ""
+
+    title = file_stem[:match.start()]
+    title = re.sub(r'[\s._-]+$', '', title)
+    return sanitize_output_component(title)
+
+
 def extract_volume_number(name: str) -> Optional[str]:
     """
     从名称中提取卷号数字，统一补齐为至少 2 位。
@@ -76,6 +93,45 @@ def extract_volume_number(name: str) -> Optional[str]:
 
     digits = match.group(1)
     return digits.zfill(max(2, len(digits)))
+
+
+def extract_folder_segments(folder_name: str) -> List[str]:
+    """
+    提取文件夹名中 `[]` 内的片段。
+    """
+    segments = re.findall(r'\[([^\[\]]+)\]', folder_name or '')
+    if segments:
+        return [segment.strip() for segment in segments if segment.strip()]
+    return [folder_name.strip()] if folder_name.strip() else []
+
+
+def is_folder_metadata_segment(segment: str) -> bool:
+    """
+    判断文件夹片段是否更像元数据而非漫画名。
+    """
+    cleaned = sanitize_output_component(segment)
+    if not cleaned:
+        return True
+    if extract_volume_number(cleaned):
+        return True
+    if cleaned.lower() in {item.lower() for item in FOLDER_METADATA_BLACKLIST}:
+        return True
+    return False
+
+
+def infer_title_from_folder(folder_name: str) -> str:
+    """
+    从 `[漫画名][][]` 风格文件夹中尽量推断漫画名。
+    """
+    segments = extract_folder_segments(folder_name)
+    candidates = [segment for segment in segments if not is_folder_metadata_segment(segment)]
+
+    if not candidates:
+        return ""
+    if len(candidates) == 1:
+        return sanitize_output_component(candidates[0])
+
+    return sanitize_output_component(max(candidates, key=lambda value: (len(value), -candidates.index(value))))
 
 
 def build_normalized_volume_name(source_name: str, comic_name: str = "") -> str:
@@ -94,14 +150,81 @@ def build_normalized_volume_name(source_name: str, comic_name: str = "") -> str:
     return safe_stem
 
 
+def get_sorted_files_with_extensions(folder_path: str, extensions: Tuple[str, ...]) -> List[str]:
+    """
+    获取指定扩展名的文件并按自然顺序排序。
+    """
+    extension_set = {ext.lower() for ext in extensions}
+    files = [
+        file_name for file_name in os.listdir(folder_path)
+        if os.path.isfile(os.path.join(folder_path, file_name))
+        and Path(file_name).suffix.lower() in extension_set
+    ]
+    files.sort(key=natural_sort_key)
+    return files
+
+
+def infer_output_comic_name(folder_path: str, comic_name: str = "", fallback_name: str = "") -> str:
+    """
+    推断输出目录使用的漫画名，优先级：
+    1. 显式 comic_name
+    2. 首个漫画文件名中的 `漫画名 Vol.xx`
+    3. 文件夹名中的 `[]` 片段推断
+    4. fallback_name / 文件夹名
+    """
+    safe_explicit = sanitize_output_component(comic_name)
+    if safe_explicit:
+        return safe_explicit
+
+    for file_name in get_sorted_files_with_extensions(folder_path, ('.zip', '.cbz', '.pdf')):
+        inferred = extract_title_from_filename(Path(file_name).stem)
+        if inferred:
+            return inferred
+
+    folder_title = infer_title_from_folder(Path(folder_path).name)
+    if folder_title:
+        return folder_title
+
+    safe_fallback = sanitize_output_component(fallback_name)
+    if safe_fallback:
+        return safe_fallback
+
+    return sanitize_output_component(Path(folder_path).name) or '未命名漫画'
+
+
+def prepare_output_layout(output_root: str, folder_path: str, comic_name: str = "",
+                          fallback_name: str = "") -> Tuple[str, str, str, str]:
+    """
+    根据输出根目录创建统一输出结构：
+    <output_root>/<漫画名>/pdf
+    <output_root>/<漫画名>/mobi
+
+    返回:
+        (safe_comic_name, comic_dir, pdf_dir, mobi_dir)
+    """
+    safe_comic_name = infer_output_comic_name(folder_path, comic_name, fallback_name)
+    root_path = Path(output_root).expanduser().resolve(strict=False)
+    comic_dir = root_path / safe_comic_name
+    pdf_dir = comic_dir / 'pdf'
+    mobi_dir = comic_dir / 'mobi'
+
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    mobi_dir.mkdir(parents=True, exist_ok=True)
+
+    return (
+        safe_comic_name,
+        str(comic_dir),
+        str(pdf_dir),
+        str(mobi_dir)
+    )
+
+
 
 def get_sorted_zip_files(folder_path: str) -> List[str]:
     """
     获取文件夹中所有ZIP文件并按自然顺序排序
     """
-    zip_files = [f for f in os.listdir(folder_path) if f.endswith('.zip')]
-    zip_files.sort(key=natural_sort_key)
-    return zip_files
+    return get_sorted_files_with_extensions(folder_path, ('.zip',))
 
 
 def get_images_from_zip(zip_path: str) -> List[Tuple[str, bytes]]:
@@ -554,14 +677,21 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     参数:
         folder_path: 包含ZIP文件的文件夹路径
         pdf_prefix: PDF文件名前缀（默认""）
-        output_folder: 输出PDF文件的文件夹路径（默认'./output')
+        output_folder: 输出根目录（实际会写入 <根目录>/<漫画名>/pdf|mobi）
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
         progress_callback: 进度回调函数(可选)
     """
-    # 创建输出文件夹（如果不存在）
-    os.makedirs(output_folder, exist_ok=True)
-    
+    resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
+        output_folder,
+        folder_path,
+        comic_name=comic_name,
+        fallback_name=pdf_prefix
+    )
+    effective_prefix = pdf_prefix or (comic_name or resolved_comic_name)
+    effective_prefix = pdf_prefix or (comic_name or resolved_comic_name)
+    effective_comic_name = comic_name or resolved_comic_name
+
     # 获取所有ZIP文件并排序
     zip_files = get_sorted_zip_files(folder_path)
     
@@ -571,10 +701,11 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     
     print(f"找到 {len(zip_files)} 个ZIP文件")
     print(f"打包模式: 按书打包（每个ZIP为一本书，包含多个章节）")
-    print(f"PDF文件名前缀: {pdf_prefix}")
-    if comic_name:
-        print(f"规范漫画名: {comic_name}")
-    print(f"输出文件夹: {output_folder}")
+    print(f"PDF文件名前缀: {effective_prefix}")
+    print(f"漫画输出目录: {comic_output_dir}")
+    print(f"PDF输出目录: {pdf_output_dir}")
+    print(f"MOBI输出目录: {mobi_output_dir}")
+    print(f"规范漫画名: {resolved_comic_name}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
@@ -607,20 +738,20 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         print(f"  找到 {len(sorted_chapter_names)} 个章节: {', '.join(sorted_chapter_names)}")
         
         # 创建PDF文件
-        normalized_book_name = build_normalized_volume_name(zip_file, comic_name) if comic_name else book_name
-        output_filename = f"{normalized_book_name}.pdf" if comic_name else f"{pdf_prefix}{book_name}.pdf"
-        output_path = os.path.join(output_folder, output_filename)
+        normalized_book_name = build_normalized_volume_name(zip_file, effective_comic_name) if effective_comic_name else book_name
+        output_filename = f"{normalized_book_name}.pdf" if effective_comic_name else f"{pdf_prefix}{book_name}.pdf"
+        output_path = os.path.join(pdf_output_dir, output_filename)
         
         print(f"  创建PDF: {output_filename}")
         
         c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
 
         # 设置PDF元数据，帮助Kindle识别
-        title = normalized_book_name if comic_name else Path(zip_file).stem
+        title = normalized_book_name if effective_comic_name else Path(zip_file).stem
         c.setTitle(title)
         c.setAuthor("Comic Packer")
         c.setSubject("Comic Book")
-        book_title = normalized_book_name if comic_name else book_name
+        book_title = normalized_book_name if effective_comic_name else book_name
         
         # 2. 收集所有章节的图片
         all_images = []
@@ -704,10 +835,10 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         
         # 如果需要,转换为MOBI
         if convert_to_mobi:
-            mobi_path = convert_pdf_to_mobi(output_path, output_folder, kindle_profile)
+            mobi_path = convert_pdf_to_mobi(output_path, mobi_output_dir, kindle_profile)
             if not mobi_path:
                 raise RuntimeError(f"MOBI转换失败: {Path(output_path).name}")
-            print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+            print(f"  ✓ MOBI已创建并验证: {Path(mobi_path).name}")
     
     print(f"\n所有书籍打包完成！共处理 {len(zip_files)} 本书")
     if convert_to_mobi:
@@ -715,15 +846,18 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     
     # 报告完成
     if progress_callback:
-        progress_callback('completed', len(zip_files), len(zip_files), 
-                         f'所有书籍打包完成！共处理 {len(zip_files)} 本书')
+        completion_message = f'所有书籍打包完成！共处理 {len(zip_files)} 本书'
+        if convert_to_mobi:
+            completion_message += '，MOBI 已验证生成'
+        progress_callback('completed', len(zip_files), len(zip_files), completion_message)
 
 
 
 
-def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "", 
-                        output_folder: str = './output', convert_to_mobi: bool = False, 
-                        kindle_profile: str = 'KPW5', progress_callback: Optional[Callable] = None):
+def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "",
+                        output_folder: str = './output', convert_to_mobi: bool = False,
+                        kindle_profile: str = 'KPW5', progress_callback: Optional[Callable] = None,
+                        comic_name: str = ""):
     """
     主函数:将文件夹中的ZIP文件按批次打包成PDF
     
@@ -731,13 +865,17 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         folder_path: 包含ZIP文件的文件夹路径
         batch_size: 每个PDF包含的章节数量(默认10)
         pdf_prefix: PDF文件名前缀(默认"")
-        output_folder: 输出PDF文件的文件夹路径(默认'./output')
+        output_folder: 输出根目录（实际会写入 <根目录>/<漫画名>/pdf|mobi）
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
         progress_callback: 进度回调函数(可选)
     """
-    # 创建输出文件夹(如果不存在)
-    os.makedirs(output_folder, exist_ok=True)
+    resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
+        output_folder,
+        folder_path,
+        comic_name=comic_name,
+        fallback_name=pdf_prefix
+    )
     
     # 获取所有ZIP文件并排序
     zip_files = get_sorted_zip_files(folder_path)
@@ -748,8 +886,11 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     
     print(f"找到 {len(zip_files)} 个ZIP文件")
     print(f"批次大小: {batch_size} 个章节/PDF")
-    print(f"PDF文件名前缀: {pdf_prefix}")
-    print(f"输出文件夹: {output_folder}")
+    print(f"PDF文件名前缀: {effective_prefix}")
+    print(f"漫画输出目录: {comic_output_dir}")
+    print(f"PDF输出目录: {pdf_output_dir}")
+    print(f"MOBI输出目录: {mobi_output_dir}")
+    print(f"规范漫画名: {resolved_comic_name}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
@@ -774,19 +915,19 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         # 生成输出文件名
         first_chapter = extract_chapter_name(batch_files[0])
         last_chapter = extract_chapter_name(batch_files[-1])
-        prefix_part = f"{pdf_prefix}_" if pdf_prefix else ""
+        prefix_part = f"{effective_prefix}_" if effective_prefix else ""
         output_filename = f"{prefix_part}{first_chapter}_to_{last_chapter}.pdf"
         
         # 创建PDF
-        create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1, output_folder)
+        create_pdf_from_chapters(batch_files, folder_path, output_filename, batch_num + 1, pdf_output_dir)
         
         # 如果需要,转换为MOBI
         if convert_to_mobi:
-            pdf_path = os.path.join(output_folder, output_filename)
-            mobi_path = convert_pdf_to_mobi(pdf_path, output_folder, kindle_profile)
+            pdf_path = os.path.join(pdf_output_dir, output_filename)
+            mobi_path = convert_pdf_to_mobi(pdf_path, mobi_output_dir, kindle_profile)
             if not mobi_path:
                 raise RuntimeError(f"MOBI转换失败: {Path(pdf_path).name}")
-            print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+            print(f"  ✓ MOBI已创建并验证: {Path(mobi_path).name}")
     
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
     if convert_to_mobi:
@@ -794,8 +935,10 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     
     # 报告完成
     if progress_callback:
-        progress_callback('completed', total_batches, total_batches, 
-                         f'全部完成! 共创建 {total_batches} 个PDF文件')
+        completion_message = f'全部完成! 共创建 {total_batches} 个PDF文件'
+        if convert_to_mobi:
+            completion_message += '，MOBI 已验证生成'
+        progress_callback('completed', total_batches, total_batches, completion_message)
 
 
 
@@ -811,13 +954,18 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     参数:
         folder_path: 包含CBZ文件的文件夹路径
         cbz_prefix:  cbz文件名前缀（默认""）
-        output_folder: 输出PDF文件的文件夹路径（默认'./output'）
+        output_folder: 输出根目录（实际会写入 <根目录>/<漫画名>/pdf|mobi）
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
         progress_callback: 进度回调函数(可选)
     """
-    # 创建输出文件夹（如果不存在）
-    os.makedirs(output_folder, exist_ok=True)
+    resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
+        output_folder,
+        folder_path,
+        comic_name=comic_name,
+        fallback_name=cbz_prefix
+    )
+    effective_comic_name = comic_name or resolved_comic_name
     
     # 获取所有CBZ文件（CBZ本质上是ZIP文件）
     cbz_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.cbz')]
@@ -829,9 +977,10 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     
     print(f"找到 {len(cbz_files)} 个CBZ文件")
     print(f"转换模式: CBZ -> PDF (每个CBZ生成一个PDF，自动检测章节)")
-    if comic_name:
-        print(f"规范漫画名: {comic_name}")
-    print(f"输出文件夹: {output_folder}")
+    print(f"漫画输出目录: {comic_output_dir}")
+    print(f"PDF输出目录: {pdf_output_dir}")
+    print(f"MOBI输出目录: {mobi_output_dir}")
+    print(f"规范漫画名: {resolved_comic_name}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
     
@@ -845,10 +994,10 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
         cbz_path = os.path.join(folder_path, cbz_file)
         
         # 生成PDF文件名（优先使用规范化的 漫画名 Vol.xx 命名）
-        normalized_cbz_name = build_normalized_volume_name(cbz_file, comic_name) if comic_name else Path(cbz_file).stem
+        normalized_cbz_name = build_normalized_volume_name(cbz_file, effective_comic_name) if effective_comic_name else Path(cbz_file).stem
         prefix_part = f"{cbz_prefix}_" if cbz_prefix else ""
-        pdf_filename = f"{normalized_cbz_name}.pdf" if comic_name else f"{prefix_part}{Path(cbz_file).stem}.pdf"
-        output_path = os.path.join(output_folder, pdf_filename)
+        pdf_filename = f"{normalized_cbz_name}.pdf" if effective_comic_name else f"{prefix_part}{Path(cbz_file).stem}.pdf"
+        output_path = os.path.join(pdf_output_dir, pdf_filename)
         
         print(f"\n[{idx}/{len(cbz_files)}] 处理: {cbz_file}")
         
@@ -894,7 +1043,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
             c = canvas.Canvas(output_path, pagesize=(page_width, page_height))
             
             # 设置PDF元数据
-            title = normalized_cbz_name if comic_name else Path(cbz_file).stem
+            title = normalized_cbz_name if effective_comic_name else Path(cbz_file).stem
             c.setTitle(title)
             c.setAuthor("Comic Packer")
             c.setSubject("Comic Book")
@@ -990,25 +1139,84 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
             
             # 如果需要,转换为MOBI
             if convert_to_mobi:
-                mobi_path = convert_pdf_to_mobi(output_path, output_folder, kindle_profile)
+                mobi_path = convert_pdf_to_mobi(output_path, mobi_output_dir, kindle_profile)
                 if not mobi_path:
                     raise RuntimeError(f"MOBI转换失败: {Path(output_path).name}")
-                print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+                print(f"  ✓ MOBI已创建并验证: {Path(mobi_path).name}")
             
         except Exception as e:
             print(f"  ✗ 错误: 处理 {cbz_file} 时出错 - {e}")
     
     print(f"\n{'='*50}")
     print(f"✓ 转换完成! 成功: {success_count}/{len(cbz_files)}")
-    print(f"输出目录: {output_folder}")
+    print(f"漫画输出目录: {comic_output_dir}")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
     
     # 报告完成
     if progress_callback:
-        progress_callback('completed', len(cbz_files), len(cbz_files), 
-                         f'转换完成! 成功: {success_count}/{len(cbz_files)}')
+        completion_message = f'转换完成! 成功: {success_count}/{len(cbz_files)}'
+        if convert_to_mobi:
+            completion_message += '，MOBI 已验证生成'
+        progress_callback('completed', len(cbz_files), len(cbz_files), completion_message)
 
+
+def convert_pdf_folder_to_mobi(folder_path: str, output_folder: str = './output',
+                               kindle_profile: str = 'KPW5',
+                               progress_callback: Optional[Callable] = None,
+                               comic_name: str = ""):
+    """
+    PDF转MOBI模式：将文件夹中的PDF批量转换为MOBI，
+    输出到 <输出根目录>/<漫画名>/mobi。
+    """
+    resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
+        output_folder,
+        folder_path,
+        comic_name=comic_name,
+        fallback_name=Path(folder_path).name
+    )
+
+    pdf_files = get_sorted_files_with_extensions(folder_path, ('.pdf',))
+    if not pdf_files:
+        raise FileNotFoundError(f"在 {folder_path} 中没有找到PDF文件")
+
+    print(f"找到 {len(pdf_files)} 个PDF文件")
+    print("转换模式: PDF -> MOBI")
+    print(f"漫画输出目录: {comic_output_dir}")
+    print(f"PDF归档目录: {pdf_output_dir}")
+    print(f"MOBI输出目录: {mobi_output_dir}")
+    print(f"规范漫画名: {resolved_comic_name}")
+    print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
+
+    if progress_callback:
+        progress_callback('scanning', 0, len(pdf_files), f'找到 {len(pdf_files)} 个PDF文件')
+
+    success_count = 0
+    for idx, pdf_file in enumerate(pdf_files, 1):
+        pdf_path = os.path.join(folder_path, pdf_file)
+        print(f"\n[{idx}/{len(pdf_files)}] 转换: {pdf_file}")
+
+        if progress_callback:
+            progress_callback('processing', idx - 1, len(pdf_files), f'转换 {idx}/{len(pdf_files)}: {pdf_file}')
+
+        mobi_path = convert_pdf_to_mobi(pdf_path, mobi_output_dir, kindle_profile)
+        if not mobi_path:
+            raise RuntimeError(f"MOBI转换失败: {pdf_file}")
+
+        success_count += 1
+        print(f"  ✓ MOBI已创建并验证: {Path(mobi_path).name}")
+
+    print(f"\n{'='*50}")
+    print(f"✓ PDF->MOBI 转换完成! 成功: {success_count}/{len(pdf_files)}")
+    print(f"漫画输出目录: {comic_output_dir}")
+
+    if progress_callback:
+        progress_callback(
+            'completed',
+            len(pdf_files),
+            len(pdf_files),
+            f'PDF->MOBI 转换完成! 成功: {success_count}/{len(pdf_files)}'
+        )
 
 
 def _format_kcc_output(output: str, max_lines: int = 12) -> List[str]:
@@ -1254,6 +1462,7 @@ if __name__ == "__main__":
   python main.py --mode book --prefix "我的漫画"     # 按书打包并自定义前缀
   python main.py --mode cbz --folder ./cbz_files    # CBZ转PDF模式
   python main.py --mode cbz --folder ./cbz --output ./pdfs  # CBZ转PDF并指定输出目录
+  python main.py --mode pdf --folder ./pdf_files    # PDF转MOBI模式
         """
     )
     
@@ -1277,20 +1486,27 @@ if __name__ == "__main__":
         default='',
         help='PDF文件名前缀 (默认: )'
     )
+
+    parser.add_argument(
+        '--comic-name',
+        type=str,
+        default='',
+        help='漫画输出名（用于输出目录和规范文件名，默认自动推断）'
+    )
     
     parser.add_argument(
         '--output',
         type=str,
         default='./output',
-        help='输出PDF文件的文件夹路径 (默认: ./output)'
+        help='输出根目录；实际会写入 <输出根目录>/<漫画名>/pdf|mobi (默认: ./output)'
     )
     
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['batch', 'book', 'cbz'],
+        choices=['batch', 'book', 'cbz', 'pdf'],
         default='batch',
-        help='打包模式: batch=固定批次打包, book=按书打包（检测图片序号重置）, cbz=CBZ转PDF (默认: batch)'
+        help='打包模式: batch=固定批次打包, book=按书打包（检测图片序号重置）, cbz=CBZ转PDF, pdf=PDF转MOBI (默认: batch)'
     )
     
     parser.add_argument(
@@ -1311,28 +1527,42 @@ if __name__ == "__main__":
     # 解析命令行参数
     args = parser.parse_args()
     
+    if args.mode == 'batch' and args.comic_name and not args.prefix:
+        args.prefix = args.comic_name
+
     # 根据模式执行不同的打包逻辑
     if args.mode == 'book':
-        pack_comics_by_book(args.folder, args.prefix, args.output, 
-                           args.convert_to_mobi, args.kindle_profile)
+        pack_comics_by_book(
+            args.folder,
+            args.prefix,
+            args.output,
+            args.convert_to_mobi,
+            args.kindle_profile,
+            comic_name=args.comic_name
+        )
     elif args.mode == 'cbz':
-        convert_cbz_to_pdf(args.folder, args.prefix, args.output,
-                          args.convert_to_mobi, args.kindle_profile)
+        convert_cbz_to_pdf(
+            args.folder,
+            args.prefix,
+            args.output,
+            args.convert_to_mobi,
+            args.kindle_profile,
+            comic_name=args.comic_name
+        )
+    elif args.mode == 'pdf':
+        convert_pdf_folder_to_mobi(
+            args.folder,
+            args.output,
+            args.kindle_profile,
+            comic_name=args.comic_name
+        )
     else:
-        pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output,
-                          args.convert_to_mobi, args.kindle_profile)
-    
-    # 如果启用了MOBI转换，删除output文件夹下所有PDF文件
-    if args.convert_to_mobi:
-        print(f"\n清理PDF文件...")
-        pdf_count = 0
-        for filename in os.listdir(args.output):
-            if filename.lower().endswith('.pdf'):
-                pdf_path = os.path.join(args.output, filename)
-                try:
-                    os.remove(pdf_path)
-                    pdf_count += 1
-                    print(f"  已删除: {filename}")
-                except Exception as e:
-                    print(f"  删除失败: {filename} - {e}")
-        print(f"✓ 已清理 {pdf_count} 个PDF文件")
+        pack_comics_to_pdf(
+            args.folder,
+            args.batch_size,
+            args.prefix,
+            args.output,
+            args.convert_to_mobi,
+            args.kindle_profile,
+            comic_name=args.comic_name
+        )

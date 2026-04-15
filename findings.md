@@ -110,3 +110,115 @@
 - Smoke test：在 `output/__mobi_smoketest__/smoke.pdf` 上调用 `main.convert_pdf_to_mobi(...)`，成功生成 `smoke.mobi`。
 - 真实数据回填：对 `output/相反的你和我/*.pdf` 顺序执行修复后的 `main.convert_pdf_to_mobi(...)`，8/8 成功生成 `.mobi`。
 - 最终落盘核对：`output/相反的你和我/` 现已同时存在 `Vol.01` 到 `Vol.08` 的 `.pdf` 与 `.mobi`。
+
+## Web Status Tightening + README Follow-up (2026-04-15)
+- `web_server.py` 的 worker 完成日志已收紧为 “completed successfully with verified outputs”，避免继续沿用含糊的成功语义。
+- Worker 在完成时会确保 job.progress 至少拥有明确的 `completed` 阶段、100% 进度和“任务已完成，输出文件已写入目标目录”消息。
+- Worker 失败分支移除了 `jobs_lock` 内部再次调用 `tracker.update(...)` 的锁重入风险，避免失败时潜在死锁。
+- `static/app.js` 现在会在非运行态任务卡片上显示最终消息，因此 `completed` / `failed` / `cancelled` 不再只有标签，没有结果说明。
+- `README.md` 已补充：若使用项目根目录自带的 `./kindlegen`，Linux 下需先执行 `chmod +x ./kindlegen`；同时注明 Web 模式会尝试自动修复权限。
+
+## Verification Evidence: Status + Docs Follow-up
+- `python3 -m py_compile main.py web_server.py` 通过。
+- `node --check static/app.js` 通过。
+- 再次运行 MOBI smoke test：`output/__mobi_smoketest__/smoke-status-docs.pdf` 成功生成 `smoke-status-docs.mobi`。
+
+## Web config.toml + /mnt sandbox + download feature (2026-04-15)
+- Web 现在改为使用项目根目录 `config.toml` 保存默认漫画目录和默认输出目录，不再依赖浏览器 `localStorage`。
+- `config.toml` 当前使用最小 TOML 结构：
+  - `comic_folder = "..."`
+  - `output_folder = "..."`
+- Web 启动或读取配置时会自动规范化配置：
+  - 漫画目录必须位于 `/mnt/` 下且存在
+  - 输出目录必须位于 `/mnt/` 下；若不存在会自动创建
+  - 若配置非法，则回退到 `/mnt/data/down/comic`（存在时）或 `/mnt`
+- 点击前端“📌 设为默认路径”后，后端会：
+  1. 把当前浏览路径写入 `comic_folder`
+  2. 把 `output_folder` 同步为“漫画目录上一级目录下的 `comic_output`”
+  3. 自动创建该输出目录
+- 文件浏览器与下载接口都已收紧到 `/mnt/` 沙箱内：
+  - `/api/browse` 仅允许浏览 `/mnt/` 下路径
+  - `/api/detect-mode` / `/api/jobs` / `/api/download` 也会拒绝 `/mnt/` 外路径
+- 文件浏览器现在会为可下载文件显示“⬇️ 下载”按钮，支持扩展名：`.zip/.cbz/.pdf/.mobi/.epub`
+- 前端输出目录输入框现在优先跟随配置文件里的 `output_folder`，不再使用浏览器本地默认路径。
+
+## Verification Evidence: config + sandbox + download
+- `python3 -m py_compile web_server.py main.py` 通过。
+- `node --check static/app.js` 通过。
+- Flask `test_client()` 验证：
+  - `GET /api/config` 返回 `comic_folder=/mnt/data/down/comic`、`output_folder=/mnt/data/down/comic_output`
+  - `POST /api/browse` 访问 `/mnt/data/down/comic` 返回 200
+  - `POST /api/browse` 访问 `/root` 返回 403，错误为“只允许访问 /mnt/ 下的文件”
+  - `POST /api/config/default-path` 返回 200，且 `/mnt/data/down/comic_output` 已确认存在
+  - `GET /api/download` 对真实 ZIP 文件返回 200，并带有 `Content-Disposition: attachment`
+
+## Default-path save error follow-up (2026-04-15)
+- 用户看到的 `Unexpected token '<', "<!doctype ..." is not valid JSON` 并不是配置写入逻辑本身失败，而是前端拿到了 HTML 错误页后仍按 JSON 解析。
+- 排查时发现运行中的 `python web_server.py` 进程启动于 14:51 之前的旧代码版本；在旧进程未重启时，浏览器已加载到新的 `static/app.js`，但后端尚未注册 `/api/config/default-path`，因此会返回 HTML 404/错误页。
+- 现在前端新增了 `readApiPayload(response)`：即使后端返回 HTML 或其他非 JSON 响应，也会转成可读错误信息，例如“服务端返回了 HTML（HTTP xxx），可能需要重启 Web 服务”。
+- 同时已重启 Web 服务进程，使新的 `/api/config` 与 `/api/config/default-path` 路由真正生效。
+
+## Output-root restructure + PDF mode (2026-04-15)
+- 当前 `main.py` 的 `book` / `batch` / `cbz` 三个入口都把 `output_folder` 当作最终落盘目录，PDF 与 MOBI 会直接混写在同一级目录。
+- Web 前端的“输出目录”当前已经更接近“根目录”输入：`config.toml` 保存的是统一输出目录，`create_job()` 也把该路径直接发给后端；因此真正需要调整的是后端落盘语义，而不是再让前端继续拼 `漫画名` 子目录。
+- CLI 末尾仍保留“启用 MOBI 后删除输出目录下所有 PDF”的旧逻辑；这与新需求“保留 `pdf/` 与 `mobi/` 子目录”冲突，后续需要移除或重写。
+- `detect_mode()` 目前只统计 `zip/cbz`，虽然 `analyze_comic_folder()` 已把 `.pdf` 纳入漫画文件样本，但不会推荐 `pdf` 模式。
+- 现有单文件 `convert_pdf_to_mobi(...)` 已具备：
+  1. KCC / kindlegen 环境准备
+  2. 真实 `.mobi` 落盘校验
+  3. 失败日志输出
+  因此新增 `pdf` 模式时，重点在“批量扫描 + 目标目录布局 + 进度回调”。
+- 当前 Web UI 下拉框没有 `pdf` 模式，且“转换为 MOBI 格式”复选框默认选中；若新增 `pdf` 模式，界面语义需要避免出现“已经是 PDF→MOBI 模式，但还要再勾一次 MOBI”的重复表达。
+
+## Output-root restructure implementation (2026-04-15)
+- `main.py` 新增统一输出布局 helper：给定输出根目录、漫画名/推断名后，统一创建：
+  - `<output_root>/<漫画名>/pdf`
+  - `<output_root>/<漫画名>/mobi`
+- `book` / `batch` / `cbz` 三种模式现在都把 PDF 写入 `pdf/` 子目录；若启用 MOBI，则输出到 `mobi/` 子目录。
+- `batch` 模式现在也会把推断出的漫画名用于默认前缀，避免只在目录层有漫画名、文件名却完全缺少标题。
+- CLI 新增 `--comic-name` 参数；当显式传入时，它同时参与：
+  1. 漫画目录名
+  2. `book/cbz` 的规范卷名输出
+  3. `batch` 的默认前缀（若未手填 `--prefix`）
+- CLI 删除了旧的“启用 MOBI 后删除输出目录下所有 PDF”尾处理，因为新需求要求同时保留 `pdf/` 与 `mobi/` 产物。
+
+## PDF mode implementation (2026-04-15)
+- `main.py` 新增 `convert_pdf_folder_to_mobi(...)`：
+  - 扫描目录内 `.pdf`
+  - 使用现有 `convert_pdf_to_mobi(...)` 逐个转换
+  - 通过 `progress_callback` 回传扫描/处理/完成阶段
+  - 输出到 `<output_root>/<漫画名>/mobi`
+- `web_server.py`：
+  - worker 新增 `pdf` 分支
+  - `/api/detect-mode` 新增 `pdf_count` 统计与 `recommended_mode='pdf'`
+  - `create_job()` 在 `mode=pdf` 时强制 `convert_to_mobi=True`
+- `templates/index.html` / `static/app.js`：
+  - 模式下拉新增 `PDF 转 MOBI`
+  - `pdf` 模式下隐藏“转换为 MOBI”复选框（因为模式自身已经隐含该语义）
+  - 预览文本与帮助文案会显示新的输出结构：`输出根目录/漫画名/pdf|mobi`
+  - 自动检测到 PDF 文件夹时会切换到 `pdf` 模式并弹出提示
+
+## Verification Evidence: output-root + PDF mode
+- `python3 -m py_compile main.py web_server.py` 通过。
+- `node --check static/app.js` 通过。
+- `conda run -n comic python main.py --help` 已显示：
+  - `--comic-name`
+  - `--mode {batch,book,cbz,pdf}`
+  - 更新后的输出根目录帮助文案
+- Flask `test_client()` 调用 `/api/detect-mode`：
+  - 输入：`/mnt/data/down/comic/[想结束这场“我爱你”的游戏][堂本裕貴][Vol.01-Vol.06][长鸿][电子版][PDF]`
+  - 返回：`recommended_mode=pdf`，`pdf_count=6`
+- 真实 CBZ 样本验证：
+  - 输入：复制 `Vol.01.cbz` 到临时目录
+  - 调用：`main.convert_cbz_to_pdf(..., convert_to_mobi=True, comic_name='相反的你和我')`
+  - 结果：生成
+    - `.../相反的你和我/pdf/相反的你和我 Vol.01.pdf`
+    - `.../相反的你和我/mobi/相反的你和我 Vol.01.mobi`
+- PDF 模式 smoke test：
+  - 输入：临时目录中的 `测试漫画 Vol.01.pdf`
+  - 调用：`main.convert_pdf_folder_to_mobi(..., comic_name='测试漫画')`
+  - 结果：生成 `.../测试漫画/mobi/测试漫画 Vol.01.mobi`，同时 `.../测试漫画/pdf/` 目录已创建
+
+## Remaining Risks / Follow-up
+- `book` / `cbz` 在 CLI 未显式传入 `--comic-name` 时依赖“首个文件名/文件夹名推断”；对于极端命名样本仍可能需要用户手动覆盖。
+- `pdf` 模式目前只扫描所选目录的一级 PDF 文件，不做递归子目录遍历；这是当前行为，不是 bug。

@@ -1,14 +1,14 @@
 // ComicPacker Web Interface - Client-side JavaScript
 
 // Configuration
-const DEFAULT_PATH_KEY = 'comicpacker_default_path';
 const ACTIVE_JOB_STATUSES = new Set(['pending', 'running']);
 const FAST_CONSOLE_POLL_MS = 1000;
 const IDLE_CONSOLE_POLL_MS = 4000;
 const HIDDEN_CONSOLE_POLL_MS = 15000;
+const FALLBACK_BROWSE_ROOT = '/mnt';
 
 // State management
-let currentPath = '.';
+let currentPath = FALLBACK_BROWSE_ROOT;
 let selectedFolder = null;
 let selectedFolderAnalysis = null;
 let latestConsoleOutput = [];
@@ -17,6 +17,8 @@ let consolePollTimer = null;
 let consolePollInFlight = false;
 let hasActiveJobs = false;
 let lastFocusedElement = null;
+let defaultComicFolder = FALLBACK_BROWSE_ROOT;
+let defaultOutputFolder = `${FALLBACK_BROWSE_ROOT}/comic_output`;
 
 // DOM elements
 const fileList = document.getElementById('file-list');
@@ -47,30 +49,74 @@ const batchSizeGroup = document.getElementById('batch-size-group');
 const batchSizeSlider = document.getElementById('batch-size');
 const batchSizeValue = document.getElementById('batch-size-value');
 const modeSelect = document.getElementById('mode');
+const convertToMobiGroup = document.getElementById('convert-to-mobi-group');
 const convertToMobiCheckbox = document.getElementById('convert-to-mobi');
 const kindleProfileGroup = document.getElementById('kindle-profile-group');
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-    const startPath = getDefaultPath() || '.';
-    loadDirectory(startPath);
-    loadJobs();
     setupEventListeners();
-    updateOutputPreview();
+    updateModeSpecificControls();
     renderConsoleOutputs([]);
+    initializePage();
 });
 
-// Settings management
-function getDefaultPath() {
-    return localStorage.getItem(DEFAULT_PATH_KEY);
+async function initializePage() {
+    const config = await loadConfig();
+    await loadDirectory(config.comic_folder || FALLBACK_BROWSE_ROOT);
+    loadJobs();
 }
 
-function setCurrentAsDefault() {
-    if (currentPath) {
-        localStorage.setItem(DEFAULT_PATH_KEY, currentPath);
-        showNotification(`✓ 已设置默认路径: ${currentPath}`, 'success');
-    } else {
+async function loadConfig() {
+    try {
+        const response = await fetch('/api/config');
+        const data = await readApiPayload(response);
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load config');
+        }
+
+        defaultComicFolder = data.comic_folder || FALLBACK_BROWSE_ROOT;
+        defaultOutputFolder = data.output_folder || `${FALLBACK_BROWSE_ROOT}/comic_output`;
+        setOutputValue(defaultOutputFolder, true);
+        return data;
+    } catch (error) {
+        console.error('Error loading config:', error);
+        setOutputValue(defaultOutputFolder, true);
+        showNotification('⚠ 读取配置文件失败，已使用 /mnt 默认路径', 'warning');
+        return {
+            comic_folder: defaultComicFolder,
+            output_folder: defaultOutputFolder
+        };
+    }
+}
+
+async function setCurrentAsDefault() {
+    if (!currentPath) {
         showNotification('⚠ 当前路径无效', 'warning');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/config/default-path', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ path: currentPath })
+        });
+
+        const data = await readApiPayload(response);
+        if (!response.ok) {
+            throw new Error(data.error || '保存默认路径失败');
+        }
+
+        defaultComicFolder = data.comic_folder || currentPath;
+        defaultOutputFolder = data.output_folder || defaultOutputFolder;
+        setOutputValue(defaultOutputFolder, true);
+        showNotification(`✓ 已写入配置文件: ${defaultComicFolder}`, 'success');
+    } catch (error) {
+        console.error('Error saving default path:', error);
+        showNotification(`⚠ 保存默认路径失败: ${error.message}`, 'warning');
     }
 }
 
@@ -89,6 +135,30 @@ function showNotification(message, type = 'info') {
         notification.classList.remove('show');
         setTimeout(() => notification.remove(), 300);
     }, 3000);
+}
+
+async function readApiPayload(response) {
+    const contentType = response.headers.get('content-type') || '';
+    const rawText = await response.text();
+
+    if (!rawText) {
+        return {};
+    }
+
+    if (contentType.includes('application/json')) {
+        return JSON.parse(rawText);
+    }
+
+    try {
+        return JSON.parse(rawText);
+    } catch (error) {
+        const isHtml = rawText.trim().startsWith('<');
+        return {
+            error: isHtml
+                ? `服务端返回了 HTML（HTTP ${response.status}），可能需要重启 Web 服务`
+                : `服务端返回了无法解析的响应（HTTP ${response.status}）`
+        };
+    }
 }
 
 function escapeHtml(value) {
@@ -115,6 +185,7 @@ function getCurrentComicName() {
 function setOutputValue(value, autoManaged = true) {
     outputInput.value = value;
     outputInput.dataset.autoManaged = autoManaged ? 'true' : 'false';
+    updateOutputPreview();
 }
 
 function formatNamingSource(data) {
@@ -143,10 +214,8 @@ function updateOutputFolderSuggestion(force = false) {
         return;
     }
 
-    const comicName = sanitizePathComponent(getCurrentComicName());
-
-    if (comicName) {
-        setOutputValue(`./output/${comicName}`, true);
+    if (defaultOutputFolder) {
+        setOutputValue(defaultOutputFolder, true);
         return;
     }
 
@@ -162,19 +231,48 @@ function updateOutputPreview() {
     const previewVolume = selectedFolderAnalysis?.sample_volume || '01';
     const comicName = getCurrentComicName();
     const batchPreviewBase = comicName || '漫画名';
-    const previewText = modeSelect.value === 'batch'
-        ? `${batchPreviewBase}_CH-001_to_CH-010`
-        : (comicName
-            ? `${comicName} Vol.${previewVolume}`
-            : (selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`));
+    let previewText;
+
+    if (modeSelect.value === 'batch') {
+        previewText = `${batchPreviewBase}_CH-001_to_CH-010.pdf`;
+    } else if (modeSelect.value === 'pdf') {
+        previewText = comicName
+            ? `${comicName} Vol.${previewVolume}.mobi`
+            : `${selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`}.mobi`;
+    } else {
+        previewText = comicName
+            ? `${comicName} Vol.${previewVolume}.pdf`
+            : `${selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`}.pdf`;
+    }
 
     outputNamePreview.textContent = previewText;
 
-    if (selectedFolderAnalysis?.first_file_name) {
-        outputPreviewHelp.textContent = `源文件示例：${selectedFolderAnalysis.first_file_name}`;
+    const rootDir = (outputInput.value || './output').trim() || './output';
+    const folderName = sanitizePathComponent(comicName || selectedFolderAnalysis?.comic_name || '漫画名');
+
+    if (modeSelect.value === 'pdf') {
+        outputPreviewHelp.textContent = `输出结构：${rootDir}/${folderName}/mobi/${previewText}`;
     } else {
-        outputPreviewHelp.textContent = '预览格式：漫画名 Vol.01';
+        outputPreviewHelp.textContent = `输出结构：${rootDir}/${folderName}/pdf/${previewText}${convertToMobiCheckbox.checked ? ` ｜ 另生成 ${rootDir}/${folderName}/mobi/` : ''}`;
     }
+}
+
+function updateModeSpecificControls() {
+    const isBatchMode = modeSelect.value === 'batch';
+    const isPdfMode = modeSelect.value === 'pdf';
+
+    batchSizeGroup.style.display = isBatchMode ? 'block' : 'none';
+    convertToMobiGroup.style.display = isPdfMode ? 'none' : 'block';
+
+    if (isPdfMode) {
+        convertToMobiCheckbox.checked = true;
+    }
+
+    kindleProfileGroup.style.display = (isPdfMode || convertToMobiCheckbox.checked)
+        ? 'block'
+        : 'none';
+
+    updateOutputPreview();
 }
 
 function applyFolderAnalysis(data) {
@@ -310,23 +408,16 @@ function setupEventListeners() {
     });
 
     // Mode selection
-    modeSelect.addEventListener('change', (e) => {
-        if (e.target.value === 'batch') {
-            batchSizeGroup.style.display = 'block';
-        } else {
-            batchSizeGroup.style.display = 'none';
-        }
-
-        updateOutputPreview();
+    modeSelect.addEventListener('change', () => {
+        updateModeSpecificControls();
     });
 
     // MOBI conversion checkbox
     convertToMobiCheckbox.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            kindleProfileGroup.style.display = 'block';
-        } else {
-            kindleProfileGroup.style.display = 'none';
+        if (modeSelect.value === 'pdf') {
+            e.target.checked = true;
         }
+        updateModeSpecificControls();
     });
 
     comicNameInput.addEventListener('input', () => {
@@ -336,6 +427,7 @@ function setupEventListeners() {
 
     outputInput.addEventListener('input', () => {
         outputInput.dataset.autoManaged = 'false';
+        updateOutputPreview();
     });
 
     expandConsoleBtn.addEventListener('click', openConsoleModal);
@@ -375,12 +467,12 @@ async function loadDirectory(path) {
             },
             body: JSON.stringify({ path })
         });
+        const data = await readApiPayload(response);
 
         if (!response.ok) {
-            throw new Error('Failed to load directory');
+            throw new Error(data.error || 'Failed to load directory');
         }
 
-        const data = await response.json();
         currentPath = data.path;
         currentPathInput.value = data.path;
         currentPathInput.dataset.parent = data.parent;
@@ -388,8 +480,20 @@ async function loadDirectory(path) {
         renderFileList(data.items);
     } catch (error) {
         console.error('Error loading directory:', error);
-        fileList.innerHTML = '<div class="loading">加载失败</div>';
+        fileList.innerHTML = `<div class="loading">加载失败：${escapeHtml(error.message)}</div>`;
+        showNotification(`⚠ 加载目录失败: ${error.message}`, 'warning');
     }
+}
+
+function triggerDownload(path) {
+    const url = `/api/download?path=${encodeURIComponent(path)}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
 }
 
 // Render file list
@@ -417,6 +521,24 @@ function renderFileList(items) {
                 ${fileCount}
             </div>
         `;
+
+        if (item.is_downloadable) {
+            const fileActions = document.createElement('div');
+            fileActions.className = 'file-actions';
+
+            const downloadBtn = document.createElement('button');
+            downloadBtn.type = 'button';
+            downloadBtn.className = 'file-action-btn';
+            downloadBtn.textContent = '⬇️ 下载';
+            downloadBtn.title = `下载 ${item.name}`;
+            downloadBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                triggerDownload(item.path);
+            });
+
+            fileActions.appendChild(downloadBtn);
+            fileItem.appendChild(fileActions);
+        }
 
         fileItem.addEventListener('click', () => {
             if (item.is_dir) {
@@ -462,28 +584,27 @@ async function detectAndSwitchMode(folderPath) {
             },
             body: JSON.stringify({ path: folderPath })
         });
+        const data = await readApiPayload(response);
 
         if (!response.ok) {
-            console.error('Failed to detect mode');
-            return;
+            throw new Error(data.error || 'Failed to detect mode');
         }
 
-        const data = await response.json();
         const recommendedMode = data.recommended_mode;
         applyFolderAnalysis(data);
 
         // 切换到推荐的模式
         modeSelect.value = recommendedMode;
 
-        // 触发 change 事件以更新相关UI
-        const changeEvent = new Event('change');
-        modeSelect.dispatchEvent(changeEvent);
+        updateModeSpecificControls();
 
         // 显示通知
         if (data.cbz_count > 0) {
             showNotification(`✓ 检测到 ${data.cbz_count} 个CBZ文件，已切换到CBZ模式`, 'info');
         } else if (data.zip_count > 0) {
             showNotification(`✓ 检测到 ${data.zip_count} 个ZIP文件，已切换到按书打包模式`, 'info');
+        } else if (data.pdf_count > 0) {
+            showNotification(`✓ 检测到 ${data.pdf_count} 个PDF文件，已切换到 PDF 转 MOBI 模式`, 'info');
         } else if (data.total_comic_files > 0) {
             showNotification(`✓ 已读取 ${data.total_comic_files} 个漫画文件`, 'info');
         }
@@ -518,7 +639,7 @@ async function startConversion() {
         prefix: comicName,
         comic_name: comicName,
         output: outputFolder,
-        convert_to_mobi: convertToMobiCheckbox.checked,
+        convert_to_mobi: modeSelect.value === 'pdf' ? true : convertToMobiCheckbox.checked,
         kindle_profile: formData.get('kindle_profile') || 'KPW5'
     };
 
@@ -535,13 +656,11 @@ async function startConversion() {
             },
             body: JSON.stringify(params)
         });
+        const data = await readApiPayload(response);
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to start conversion');
+            throw new Error(data.error || 'Failed to start conversion');
         }
-
-        const data = await response.json();
 
         // Show success notification
         showNotification(`✓ 任务已提交: ${data.job_id.substring(0, 8)}`, 'success');
@@ -568,10 +687,10 @@ async function cancelJob(jobId) {
         const response = await fetch(`/api/jobs/${jobId}/cancel`, {
             method: 'POST'
         });
+        const data = await readApiPayload(response);
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to cancel job');
+            throw new Error(data.error || 'Failed to cancel job');
         }
 
         showNotification('✓ 任务取消请求已发送', 'success');
@@ -591,10 +710,10 @@ async function deleteJob(jobId) {
         const response = await fetch(`/api/jobs/${jobId}`, {
             method: 'DELETE'
         });
+        const data = await readApiPayload(response);
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to delete job');
+            throw new Error(data.error || 'Failed to delete job');
         }
 
         showNotification('✓ 任务已删除', 'success');
@@ -614,11 +733,11 @@ async function deleteJob(jobId) {
 async function loadJobs() {
     try {
         const response = await fetch('/api/jobs');
+        const data = await readApiPayload(response);
         if (!response.ok) {
-            throw new Error('Failed to load jobs');
+            throw new Error(data.error || 'Failed to load jobs');
         }
 
-        const data = await response.json();
         syncActiveJobState(data.jobs);
         renderJobList(data.jobs);
     } catch (error) {
@@ -636,9 +755,10 @@ async function clearJobHistory() {
         const response = await fetch('/api/jobs/clear', {
             method: 'POST'
         });
+        const data = await readApiPayload(response);
 
         if (!response.ok) {
-            throw new Error('Failed to clear job history');
+            throw new Error(data.error || 'Failed to clear job history');
         }
 
         // Reload job list
@@ -680,6 +800,7 @@ function renderJobList(jobs) {
         const progressInfo = progress.current && progress.total
             ? `${progress.current}/${progress.total}`
             : '';
+        const terminalMessage = progressMessage || job.error || '';
 
         // 确定显示哪个按钮
         const isActive = job.status === 'pending' || job.status === 'running';
@@ -710,6 +831,7 @@ function renderJobList(jobs) {
                             ${progressMessage ? `<div class="job-progress-message">${progressMessage}</div>` : ''}
                         </div>
                     ` : ''}
+                    ${job.status !== 'running' && terminalMessage ? `<div class="job-progress-message">${terminalMessage}</div>` : ''}
                     ${job.status === 'completed' && progressInfo ? `<div><strong>处理数量:</strong> ${progressInfo}</div>` : ''}
                     ${job.error ? `<div style="color: var(--accent-error);"><strong>错误:</strong> ${job.error}</div>` : ''}
                 </div>
@@ -722,11 +844,10 @@ function renderJobList(jobs) {
 async function loadSystemStats() {
     try {
         const response = await fetch('/api/system-stats');
+        const data = await readApiPayload(response);
         if (!response.ok) {
-            throw new Error('Failed to load system stats');
+            throw new Error(data.error || 'Failed to load system stats');
         }
-
-        const data = await response.json();
 
         // Update CPU usage
         const cpuUsage = document.getElementById('cpu-usage');
@@ -777,11 +898,11 @@ async function loadConsoleOutput() {
 
     try {
         const response = await fetch('/api/console-output');
+        const data = await readApiPayload(response);
         if (!response.ok) {
-            throw new Error('Failed to load console output');
+            throw new Error(data.error || 'Failed to load console output');
         }
 
-        const data = await response.json();
         renderConsoleOutputs(data.output || []);
 
     } catch (error) {

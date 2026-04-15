@@ -158,3 +158,126 @@
 | MOBI smoke test | `output/__mobi_smoketest__/smoke.pdf` | 生成 `smoke.mobi` | 成功生成 | ✓ |
 | 真实数据补转 | `output/相反的你和我/*.pdf` | 8 个 PDF 全部生成 `.mobi` | 8/8 成功 | ✓ |
 | 最终文件核对 | `output/相反的你和我/` | 同时存在 `.pdf` + `.mobi` | 符合预期 | ✓ |
+
+### Session Addendum: Web 状态语义 + README 文档补充
+- **Status:** complete
+- **Actions taken:**
+  - 收紧 `web_server.py` worker 的完成语义，确保完成状态附带明确终态消息。
+  - 修复失败分支中 `jobs_lock` 内部调用 `tracker.update(...)` 的潜在死锁问题。
+  - 调整 `static/app.js`，让已完成/失败/已取消任务也显示最终结果消息，而不是只显示状态标签。
+  - 在 `README.md` 的 MOBI/KCC 章节中补充 `./kindlegen` 需要执行 `chmod +x` 的说明。
+  - 重新运行语法检查与 MOBI smoke test，确认无回归。
+- **Files created/modified:**
+  - web_server.py
+  - static/app.js
+  - README.md
+  - findings.md
+  - progress.md
+  - task_plan.md
+
+## Additional Test Results: Status + Docs Follow-up
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile main.py web_server.py` | 无语法错误 | 通过 | ✓ |
+| 前端脚本语法 | `node --check static/app.js` | 无语法错误 | 通过 | ✓ |
+| MOBI smoke test（二次回归） | `output/__mobi_smoketest__/smoke-status-docs.pdf` | 成功生成 `.mobi` | 成功生成 `smoke-status-docs.mobi` | ✓ |
+| README 文档补充 | 检查 `README.md` KCC 章节 | 包含 `chmod +x ./kindlegen` 提示 | 已写入 | ✓ |
+
+### Session Addendum: config.toml / /mnt 限制 / 下载按钮
+- **Status:** complete
+- **Actions taken:**
+  - 在 `web_server.py` 中新增 `config.toml` 读写与规范化逻辑，替换前端 `localStorage` 默认路径方案。
+  - 新增 `/api/config` 与 `/api/config/default-path`，让 Web 启动读取配置、点击“设为默认路径”时同步写回配置文件。
+  - 默认路径更新时自动把输出目录设为“漫画目录上一级目录/comic_output”，并确保目录存在。
+  - 将文件浏览、目录检测、任务创建、下载接口统一限制在 `/mnt/` 沙箱内。
+  - 为文件浏览器新增下载按钮与 `/api/download` 下载接口。
+  - 新增 `config.toml` 默认文件，并创建 `/mnt/data/down/comic_output`。
+  - 更新 `README.md` 说明 `config.toml`、/mnt 限制与下载能力。
+- **Files created/modified:**
+  - web_server.py
+  - static/app.js
+  - static/style.css
+  - README.md
+  - config.toml
+  - findings.md
+  - progress.md
+  - task_plan.md
+
+## Additional Test Results: config + sandbox + download
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile web_server.py main.py` | 无语法错误 | 通过 | ✓ |
+| 前端脚本语法 | `node --check static/app.js` | 无语法错误 | 通过 | ✓ |
+| 配置读取 API | `GET /api/config` | 返回 `comic_folder`/`output_folder` | 返回 `/mnt/data/down/comic` 和 `/mnt/data/down/comic_output` | ✓ |
+| 浏览器沙箱允许路径 | `POST /api/browse {path: /mnt/data/down/comic}` | 允许访问 | 返回 200 | ✓ |
+| 浏览器沙箱拒绝路径 | `POST /api/browse {path: /root}` | 拒绝访问 | 返回 403 | ✓ |
+| 默认路径同步 | `POST /api/config/default-path` | 写回配置并创建 `comic_output` | 返回 200，目标目录存在 | ✓ |
+| 下载接口 | `GET /api/download` 对真实 ZIP 文件 | 返回附件下载 | 返回 200，带 `Content-Disposition` | ✓ |
+
+### Session Addendum: 默认路径保存报错排查
+- **Status:** complete
+- **Actions taken:**
+  - 复查当前运行中的 Web 进程，确认用户点击“设为默认路径”时命中的仍是旧版 `web_server.py`。
+  - 判定 `Unexpected token '<'` 的直接原因是：后端返回 HTML 错误页，前端仍调用 `response.json()`。
+  - 在 `static/app.js` 中新增 `readApiPayload(response)`，统一兼容 JSON / 非 JSON / HTML 错误页。
+  - 将关键 API 调用改为通过该 helper 读取响应，避免再出现无意义的 JSON 解析异常。
+  - 停止旧 Web 进程并重新启动 `start_web.sh`，让新增的配置接口正式生效。
+- **Files created/modified:**
+  - static/app.js
+  - findings.md
+  - progress.md
+  - task_plan.md
+
+## Additional Test Results: default-path error follow-up
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| 前端脚本语法 | `node --check static/app.js` | 无语法错误 | 通过 | ✓ |
+| Python 语法检查 | `python3 -m py_compile web_server.py` | 无语法错误 | 通过 | ✓ |
+| Web 进程重启 | `start_web.sh` | 新进程加载新路由 | 已重启，运行中的 `python web_server.py` 为新进程 | ✓ |
+
+### Session Addendum: 输出根目录 + PDF→MOBI 模式（进行中）
+- **Status:** in_progress
+- **Actions taken:**
+  - 运行 session catchup，并读取当前 `task_plan.md`、`findings.md`、`progress.md`。
+  - 运行 `git diff --stat` / `git status --short`，确认当前工作区已有未提交改动，需要在其基础上继续实现本轮需求。
+  - 检查 `main.py` / `web_server.py` / `static/app.js` / `templates/index.html`，定位输出目录、模式检测、任务创建和 CLI 模式入口。
+  - 确认 `omx explore` 当前不可用（缺少 cargo），改为普通 shell + 源码阅读路线。
+  - 识别当前缺口：输出仍直接写到根目录、缺少 `pdf` 模式、CLI 仍会在 MOBI 转换后删除 PDF。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Session Addendum: 输出根目录 + PDF→MOBI 模式（完成）
+- **Status:** complete
+- **Actions taken:**
+  - 在 `main.py` 中新增统一输出布局 helper，让 `book` / `batch` / `cbz` / `pdf` 模式都写入 `<output_root>/<漫画名>/pdf|mobi`。
+  - 新增 `convert_pdf_folder_to_mobi(...)`，并为 CLI 增加 `--mode pdf` 与 `--comic-name`。
+  - 删除 CLI 末尾旧的 PDF 清理逻辑，保留 `pdf/` 与 `mobi/` 两类输出。
+  - 在 `web_server.py` 中新增 `pdf` worker 分支、`/api/detect-mode` 的 `pdf_count` 与 PDF 模式推荐。
+  - 在 `templates/index.html` / `static/app.js` 中加入 `PDF 转 MOBI` 选项、模式切换逻辑和新的输出结构预览。
+  - 更新 `README.md`，说明输出根目录语义、新目录结构和 `pdf` 模式用法。
+- **Files created/modified:**
+  - main.py
+  - web_server.py
+  - static/app.js
+  - templates/index.html
+  - README.md
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Additional Test Results: output-root + PDF mode
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile main.py web_server.py` | 无语法错误 | 通过 | ✓ |
+| 前端脚本语法 | `node --check static/app.js` | 无语法错误 | 通过 | ✓ |
+| CLI 参数暴露 | `conda run -n comic python main.py --help` | 显示 `--comic-name` 与 `pdf` 模式 | 已显示 | ✓ |
+| PDF 模式检测 | Flask `POST /api/detect-mode` 对 `/mnt/.../[PDF]` 样本目录 | `recommended_mode=pdf` 且 `pdf_count>0` | 返回 `recommended_mode=pdf`、`pdf_count=6` | ✓ |
+| CBZ 输出目录布局 | 临时目录 + `Vol.01.cbz`，调用 `convert_cbz_to_pdf(..., convert_to_mobi=True)` | 生成 `漫画名/pdf/*.pdf` 与 `漫画名/mobi/*.mobi` | 生成 `相反的你和我/pdf/相反的你和我 Vol.01.pdf` 和对应 `.mobi` | ✓ |
+| PDF→MOBI 输出目录布局 | 临时目录 + `测试漫画 Vol.01.pdf`，调用 `convert_pdf_folder_to_mobi(...)` | 在 `漫画名/mobi` 下生成 `.mobi` | 生成 `测试漫画/mobi/测试漫画 Vol.01.mobi`，且 `pdf/` 目录已创建 | ✓ |
+
+## Error Log (Addendum)
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-04-15 | `omx explore` 依赖的 cargo 缺失，无法使用只读 explore 命令 | 1 | 记录并退回普通 shell / 源码检查路径 |
