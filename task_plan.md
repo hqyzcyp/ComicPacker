@@ -61,3 +61,21 @@ Complete
 ## Notes
 - 本轮风险收敛只修改了 `static/app.js` 与 planning files；弹窗结构和样式沿用已验证通过的版本。
 - 当前已无阻塞性交付风险；剩余仅为未来可能出现的“更高实时性需求”，不属于本任务必须项。
+
+
+## Session Addendum: MOBI 输出缺失分析（2026-04-15）
+- [x] 核对真实输出目录与全仓库 `.mobi/.epub` 文件
+- [x] 追踪 `main.py` 的 MOBI 创建日志来源与子进程模型
+- [x] 追踪 `web_server.py` worker 的完成时机与日志捕获边界
+- [x] 在 conda `comic` 环境下复现 KCC 失败
+- [x] 归纳根因与修复方向
+- **Status:** complete
+
+
+## Session Addendum: MOBI 修复与回填（2026-04-15）
+- [x] 将 MOBI 转换链路改为“真实执行 + 真实落盘校验”
+- [x] 修复 KCC 使用解释器与 kindlegen 可执行路径问题
+- [x] 让 MOBI 失败中断任务而不是伪成功
+- [x] 通过 smoke test 验证修复
+- [x] 将 `output/相反的你和我/` 现有 8 个 PDF 补转为 MOBI
+- **Status:** complete

@@ -10,6 +10,8 @@ import re
 import argparse
 import subprocess
 import shutil
+import stat
+import sys
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable
 from PIL import Image
@@ -17,12 +19,9 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 import io
-from multiprocessing import Process
 
 page_width, page_height = 1236, 1648
 
-# 全局进程池,用于跟踪所有MOBI转换进程
-conversion_processes = []
 INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
 
 def natural_sort_key(filename: str) -> List:
@@ -706,8 +705,9 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         # 如果需要,转换为MOBI
         if convert_to_mobi:
             mobi_path = convert_pdf_to_mobi(output_path, output_folder, kindle_profile)
-            if mobi_path:
-                print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+            if not mobi_path:
+                raise RuntimeError(f"MOBI转换失败: {Path(output_path).name}")
+            print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
     
     print(f"\n所有书籍打包完成！共处理 {len(zip_files)} 本书")
     if convert_to_mobi:
@@ -784,8 +784,9 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         if convert_to_mobi:
             pdf_path = os.path.join(output_folder, output_filename)
             mobi_path = convert_pdf_to_mobi(pdf_path, output_folder, kindle_profile)
-            if mobi_path:
-                print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+            if not mobi_path:
+                raise RuntimeError(f"MOBI转换失败: {Path(pdf_path).name}")
+            print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
     
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
     if convert_to_mobi:
@@ -990,8 +991,9 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
             # 如果需要,转换为MOBI
             if convert_to_mobi:
                 mobi_path = convert_pdf_to_mobi(output_path, output_folder, kindle_profile)
-                if mobi_path:
-                    print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
+                if not mobi_path:
+                    raise RuntimeError(f"MOBI转换失败: {Path(output_path).name}")
+                print(f"  ✓ MOBI已创建: {Path(mobi_path).name}")
             
         except Exception as e:
             print(f"  ✗ 错误: 处理 {cbz_file} 时出错 - {e}")
@@ -1009,52 +1011,149 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
 
 
 
-def _run_kcc_conversion(cmd: List[str], pdf_name: str, project_dir: str = None):
+def _format_kcc_output(output: str, max_lines: int = 12) -> List[str]:
     """
-    在独立进程中运行KCC转换命令
+    截取KCC输出末尾的关键非空行，便于在失败时展示。
+    """
+    lines = [line.rstrip() for line in (output or '').splitlines() if line.strip()]
+    return lines[-max_lines:]
+
+
+def _ensure_executable(path: str) -> bool:
+    """
+    尝试为本地二进制补充执行权限。
+    """
+    if not path or not os.path.exists(path):
+        return False
+
+    if os.access(path, os.X_OK):
+        return True
+
+    try:
+        current_mode = os.stat(path).st_mode
+        os.chmod(path, current_mode | stat.S_IXUSR)
+    except OSError:
+        return False
+
+    return os.access(path, os.X_OK)
+
+
+def _build_kcc_environment(project_dir: str) -> dict:
+    """
+    为KCC子进程准备环境变量，确保本地脚本和 kindlegen 都可被找到。
+    """
+    env = os.environ.copy()
+
+    pythonpath = env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = (
+        f"{project_dir}{os.pathsep}{pythonpath}" if pythonpath else project_dir
+    )
+
+    current_path = env.get('PATH', '')
+    env['PATH'] = (
+        f"{project_dir}{os.pathsep}{current_path}" if current_path else project_dir
+    )
+
+    local_kindlegen = os.path.join(project_dir, 'kindlegen')
+    if os.path.exists(local_kindlegen) and not _ensure_executable(local_kindlegen):
+        print(f"  ⚠ 警告: 项目内 kindlegen 存在但无法设置执行权限: {local_kindlegen}")
+
+    return env
+
+
+def _detect_generated_mobi(output_folder: str, pdf_name: str,
+                           expected_mobi_path: str,
+                           existing_mobi_files: set) -> Optional[str]:
+    """
+    根据输出目录中的实际文件变化定位本次KCC生成的MOBI文件。
+    """
+    expected_path = Path(expected_mobi_path)
+    if expected_path.exists():
+        return str(expected_path)
+
+    current_mobi_files = list(Path(output_folder).glob('*.mobi'))
+    new_mobi_files = [
+        path for path in current_mobi_files
+        if str(path.resolve()) not in existing_mobi_files
+    ]
+
+    exact_match = [path for path in new_mobi_files if path.stem == pdf_name]
+    if exact_match:
+        return str(exact_match[0])
+
+    kcc_match = [
+        path for path in new_mobi_files
+        if path.stem.startswith(f"{pdf_name}_kcc")
+    ]
+    if kcc_match:
+        latest = max(kcc_match, key=lambda path: path.stat().st_mtime)
+        return str(latest)
+
+    if len(new_mobi_files) == 1:
+        return str(new_mobi_files[0])
+
+    return None
+
+
+def _run_kcc_conversion(cmd: List[str], pdf_name: str, output_folder: str,
+                        expected_mobi_path: str, env: dict) -> Optional[str]:
+    """
+    运行KCC转换命令，并在确认MOBI实际落盘后返回真实路径。
     
     参数:
         cmd: KCC命令列表
         pdf_name: PDF文件名(用于日志)
-        project_dir: 项目根目录路径(用于设置PYTHONPATH)
+        output_folder: MOBI输出目录
+        expected_mobi_path: 预期的MOBI文件路径
+        env: 子进程环境变量
     """
+    existing_mobi_files = {
+        str(path.resolve()) for path in Path(output_folder).glob('*.mobi')
+    }
+
     try:
-        # 设置环境变量，确保 KCC 脚本能找到模块
-        env = os.environ.copy()
-        if project_dir:
-            # 添加项目根目录到 PYTHONPATH
-            pythonpath = env.get('PYTHONPATH', '')
-            if pythonpath:
-                env['PYTHONPATH'] = f"{project_dir}:{pythonpath}" # Prepend project_dir
-            else:
-                env['PYTHONPATH'] = project_dir
-        
-        # 执行转换命令
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            env=env,  # 使用修改后的环境变量
+            env=env,
             timeout=300  # 5分钟超时
         )
-        
-        if result.returncode == 0:
-            print(f"  ✓ MOBI转换完成: {pdf_name}")
-        else:
-            print(f"  ✗ MOBI转换失败: {pdf_name} (退出码: {result.returncode})")
-            if result.stderr:
-                print(f"  错误信息: {result.stderr[:200]}")
     except subprocess.TimeoutExpired:
         print(f"  ✗ MOBI转换超时: {pdf_name} (超过5分钟)")
+        return None
     except Exception as e:
         print(f"  ✗ MOBI转换出错: {pdf_name} - {e}")
+        return None
+
+    combined_output = '\n'.join(part for part in (result.stdout, result.stderr) if part)
+    if result.returncode != 0:
+        print(f"  ✗ MOBI转换失败: {pdf_name} (退出码: {result.returncode})")
+        for line in _format_kcc_output(combined_output):
+            print(f"    {line}")
+        return None
+
+    mobi_path = _detect_generated_mobi(
+        output_folder,
+        pdf_name,
+        expected_mobi_path,
+        existing_mobi_files
+    )
+    if not mobi_path:
+        print(f"  ✗ MOBI转换失败: {pdf_name} (未检测到输出文件)")
+        for line in _format_kcc_output(combined_output):
+            print(f"    {line}")
+        return None
+
+    print(f"  ✓ MOBI转换完成: {pdf_name}")
+    return mobi_path
 
 
 def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None, 
                         device_profile: str = 'KPW5') -> Optional[str]:
     """
     使用KCC (Kindle Comic Converter)将PDF转换为MOBI格式
-    使用多进程方式启动转换,不等待完成
+    仅在确认MOBI文件实际生成后返回路径
     
     参数:
         pdf_path: PDF文件的路径
@@ -1062,7 +1161,7 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
         device_profile: KCC设备配置文件(默认:KPW5表示Kindle Paperwhite 5)
     
     返回:
-        预期的MOBI文件路径,如果无法启动转换则返回None
+        实际生成的MOBI文件路径,如果转换失败则返回None
     """
     # 获取当前脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1098,6 +1197,11 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
     
     pdf_path = os.path.abspath(pdf_path)
     output_folder = os.path.abspath(output_folder)
+    env = _build_kcc_environment(script_dir)
+
+    if not shutil.which('kindlegen', path=env.get('PATH', '')):
+        print("  ⚠ 警告: 未找到可用的 kindlegen，可执行文件应位于系统 PATH 或项目根目录")
+        return None
 
     # 构建KCC命令
     # -p: 设备配置文件
@@ -1106,7 +1210,7 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
     if use_local_script:
         # 使用本地Python脚本
         cmd = [
-            'python3',
+            sys.executable or 'python3',
             kcc_script_path,
             '-p', device_profile,
             '-f', 'MOBI',
@@ -1122,19 +1226,14 @@ def convert_pdf_to_mobi(pdf_path: str, output_folder: Optional[str] = None,
             '-o', output_folder,
             pdf_path
         ]
-    
-    # 启动独立进程执行转换
-    # 传递项目根目录作为 PYTHONPATH
-    process = Process(target=_run_kcc_conversion, args=(cmd, Path(pdf_path).name, script_dir))
-    process.start()
-    
-    # 将进程添加到全局进程池
-    conversion_processes.append(process)
-    
-    print(f"  已启动MOBI转换进程: {Path(pdf_path).name}")
-    
-    # 返回预期的MOBI文件路径
-    return expected_mobi_path
+
+    return _run_kcc_conversion(
+        cmd,
+        Path(pdf_path).name,
+        output_folder,
+        expected_mobi_path,
+        env
+    )
 
 
 
@@ -1223,24 +1322,17 @@ if __name__ == "__main__":
         pack_comics_to_pdf(args.folder, args.batch_size, args.prefix, args.output,
                           args.convert_to_mobi, args.kindle_profile)
     
-    # 等待所有MOBI转换进程完成
-    if conversion_processes:
-        print(f"\n等待 {len(conversion_processes)} 个MOBI转换进程完成...")
-        for process in conversion_processes:
-            process.join()
-        print("所有MOBI转换进程已完成")
-        
-        # 如果启用了MOBI转换，删除output文件夹下所有PDF文件
-        if args.convert_to_mobi:
-            print(f"\n清理PDF文件...")
-            pdf_count = 0
-            for filename in os.listdir(args.output):
-                if filename.lower().endswith('.pdf'):
-                    pdf_path = os.path.join(args.output, filename)
-                    try:
-                        os.remove(pdf_path)
-                        pdf_count += 1
-                        print(f"  已删除: {filename}")
-                    except Exception as e:
-                        print(f"  删除失败: {filename} - {e}")
-            print(f"✓ 已清理 {pdf_count} 个PDF文件")
+    # 如果启用了MOBI转换，删除output文件夹下所有PDF文件
+    if args.convert_to_mobi:
+        print(f"\n清理PDF文件...")
+        pdf_count = 0
+        for filename in os.listdir(args.output):
+            if filename.lower().endswith('.pdf'):
+                pdf_path = os.path.join(args.output, filename)
+                try:
+                    os.remove(pdf_path)
+                    pdf_count += 1
+                    print(f"  已删除: {filename}")
+                except Exception as e:
+                    print(f"  删除失败: {filename} - {e}")
+        print(f"✓ 已清理 {pdf_count} 个PDF文件")

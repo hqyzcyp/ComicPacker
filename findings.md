@@ -71,3 +71,42 @@
   - 需要亚秒级刷新频率
   - 需要更长日志历史或服务端主动推送事件模型
 - 在这些需求出现前，当前自适应轮询方案已经足够覆盖本项目现有场景。
+
+## MOBI Output Missing Investigation (2026-04-15)
+- 实际文件系统检查显示：`output/相反的你和我/` 里只有 `Vol.01` 到 `Vol.08` 的 PDF，没有任何 `.mobi` 或 `.epub`。
+- `main.py` 在三处调用 `convert_pdf_to_mobi(...)` 后，都会立刻根据“返回的预期路径”打印 `✓ MOBI已创建`，但该函数并未检查文件是否真实存在。
+- `convert_pdf_to_mobi(...)` 实际上是异步启动 `multiprocessing.Process`，函数本身只返回 `expected_mobi_path`，并不会等待 KCC 完成，因此 `✓ MOBI已创建` 当前语义是“已提交转换任务”，不是“文件已经落盘”。
+- Web worker 在 `web_server.py` 中执行完 `pack_*` / `convert_cbz_to_pdf(...)` 后，立即将 job 标记为 `completed successfully`，没有等待 `main.conversion_processes` 里的 MOBI 子进程结束。
+- Web worker 还会把 `sys.stdout` 重定向到 `ConsoleCapture`；而 MOBI 转换是单独的 `multiprocessing.Process`。这导致子进程里的失败日志不会可靠进入当前 job 的前端日志流，因此用户只看到了父线程的“已创建/已完成”。
+- 当前运行中的 Web 进程使用的是 conda `comic` 环境，但其 `PATH` 不包含项目根目录；仓库根下虽有 `./kindlegen`，却既不在 `PATH` 中，也没有执行权限（当前权限 `-rw-r--r--`）。
+- 在该环境下直接运行 KCC CLI 会稳定报错：`ERROR: KindleGen is missing!`。
+- 用项目自己的 `convert_pdf_to_mobi(...)` 复现时，函数返回 `output/相反的你和我/相反的你和我 Vol.02.mobi`，但 `join()` 后该文件依旧不存在，并打印 `✗ MOBI转换失败 ... (退出码: 1)`。
+
+### Root Cause Summary
+1. **真实转换失败**：KCC 找不到可执行的 `kindlegen`，所以根本没有生成 `.mobi`。
+2. **状态与日志误报成功**：主线程把“预期路径”当成“创建成功”，worker 也没有等待 MOBI 子进程完成。
+3. **失败细节对前端不可见**：MOBI 在独立进程里跑，失败日志没有可靠汇入当前 job 的控制台输出。
+
+### Likely Fix Directions
+- 把 `kindlegen` 设为可执行并确保它出现在 Web 进程/子进程的 `PATH` 中，或改为代码里显式传递绝对路径。
+- `convert_pdf_to_mobi(...)` 不要在未验证文件存在前返回“成功”；至少应区分“已启动转换”和“转换完成”。
+- Web worker 在标记 job 完成前，应等待并检查所有 MOBI 子进程结果。
+- 失败时打印/回传 `stdout` 与 `stderr`，不要只看 `stderr`。
+
+## MOBI Fix Implementation (2026-04-15)
+- `main.py` 已改为**同步执行** KCC 转换，不再先返回“预期路径”后异步慢慢跑。
+- KCC 现在使用 `sys.executable` 调本地 `kcc-c2e.py`，确保 Web 进程在 conda `comic` 环境下启动时，KCC 也复用同一 Python 解释器与依赖集。
+- KCC 子进程环境现在会自动：
+  - 将项目根目录加入 `PYTHONPATH`
+  - 将项目根目录加入 `PATH`
+  - 若仓库根目录存在 `./kindlegen`，则自动补执行权限
+- 在真正检测到 `.mobi` 文件落盘前，`convert_pdf_to_mobi(...)` 不会返回成功路径。
+- 若 KCC 返回码非 0 或未检测到 `.mobi` 输出文件，会打印 KCC 输出尾部关键日志，并返回失败。
+- 三个 MOBI 调用点（book / batch / cbz）现在在失败时直接抛出异常，因此 Web worker 不会再把缺失 MOBI 的任务标记为 `completed successfully`。
+- 仓库内 `kindlegen` 当前已具备执行权限；后续在运行时若权限丢失，代码也会再次尝试修复。
+
+## Verification Evidence: MOBI Fix
+- 语法检查：`python3 -m py_compile main.py web_server.py` 通过。
+- Smoke test：在 `output/__mobi_smoketest__/smoke.pdf` 上调用 `main.convert_pdf_to_mobi(...)`，成功生成 `smoke.mobi`。
+- 真实数据回填：对 `output/相反的你和我/*.pdf` 顺序执行修复后的 `main.convert_pdf_to_mobi(...)`，8/8 成功生成 `.mobi`。
+- 最终落盘核对：`output/相反的你和我/` 现已同时存在 `Vol.01` 到 `Vol.08` 的 `.pdf` 与 `.mobi`。
