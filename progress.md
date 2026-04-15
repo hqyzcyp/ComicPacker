@@ -67,8 +67,49 @@
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 5: Delivery complete |
-| Where am I going? | 向用户汇报实现内容、验证结果与剩余风险 |
-| What's the goal? | 让用户选中文件夹后看到首个文件名，并获得可编辑的规范输出名预览 |
-| What have I learned? | 文件命名风格并不统一，必须采用“自动推断 + 用户确认”的方案 |
-| What have I done? | 已完成前后端实现，并用真实漫画样本验证命名推断与 API 返回 |
+| Where am I? | 风险收敛与交付完成 |
+| Where am I going? | 向用户汇报已关闭风险、代码改动与残余后续项 |
+| What's the goal? | 让用户选中文件夹后看到首个文件名，并获得可编辑的规范输出名预览，同时提供可放大的安全日志查看体验 |
+| What have I learned? | 文件命名风格并不统一，日志弹窗功能已通过真实浏览器验证，而刷新策略更适合做轻量优化而不是上推送架构 |
+| What have I done? | 已完成前后端实现、日志弹窗增强，以及剩余轮询风险收敛 |
+
+### Session Addendum: 控制台输出弹窗
+- **Status:** complete
+- **Actions taken:**
+  - 在 `templates/index.html` 的控制台输出面板增加“放大查看”按钮和日志弹窗结构。
+  - 在 `static/app.js` 中新增统一日志渲染、弹窗打开/关闭、ESC 关闭和遮罩点击关闭逻辑。
+  - 在 `static/style.css` 中新增面板头部与弹窗样式，并扩展大窗口日志区域显示效果。
+  - 为日志渲染增加 HTML 转义，避免特殊字符污染页面结构。
+- **Files created/modified:**
+  - templates/index.html
+  - static/app.js
+  - static/style.css
+
+## Additional Test Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile web_server.py main.py` | 无语法错误 | 通过 | ✓ |
+| 前端脚本语法 | `node --check static/app.js` | 无语法错误 | 通过 | ✓ |
+| 模板结构校验 | 检查 `expand-console-btn` / `console-modal` / `console-output-modal` | 新增弹窗相关节点存在 | 通过 | ✓ |
+| 样式钩子校验 | 检查 `.modal-overlay` / `.modal-content` / `.console-output-large` / `.panel-header` | 新增样式已声明 | 通过 | ✓ |
+
+### Session Addendum: 剩余风险关闭
+- **Status:** complete
+- **Actions taken:**
+  - 接收并记录用户对真实浏览器验证成功的反馈，关闭交互层面的剩余风险。
+  - 在 `static/app.js` 中将控制台刷新改为自适应轮询：活跃任务/弹窗打开时 1 秒、空闲可见时 4 秒、后台标签页时 15 秒。
+  - 为日志刷新增加“内容未变化不重绘”的短路逻辑，减少无意义 DOM 更新和滚动抖动。
+  - 在弹窗关闭时恢复焦点到触发按钮，补齐键盘交互上下文。
+  - 明确当前不升级 SSE / WebSocket，把更高实时性需求降为未来独立优化项。
+- **Files created/modified:**
+  - static/app.js
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Final Verification Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| 前端脚本语法 | `node --check static/app.js` | 无语法错误 | 通过 | ✓ |
+| Python 语法检查 | `python3 -m py_compile web_server.py main.py` | 无语法错误 | 通过 | ✓ |
+| 风险决策检查 | 对照真实浏览器验证结果与轮询实现 | 不引入过度设计且关闭剩余阻塞风险 | 符合预期 | ✓ |

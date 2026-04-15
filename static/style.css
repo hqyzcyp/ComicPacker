@@ -29,6 +29,10 @@ body {
     padding: 20px;
 }
 
+body.modal-open {
+    overflow: hidden;
+}
+
 .container {
     max-width: 1400px;
     margin: 0 auto;
@@ -85,6 +89,19 @@ header h1 {
     font-size: 1.5rem;
     margin-bottom: 20px;
     color: var(--accent-primary);
+}
+
+.panel-header,
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.panel-header h2,
+.modal-header h2 {
+    margin-bottom: 0;
 }
 
 /* Settings Section */
@@ -618,6 +635,10 @@ header h1 {
     margin-bottom: 20px;
 }
 
+.console-panel .panel-header {
+    margin-bottom: 20px;
+}
+
 .console-output {
     background: var(--bg-primary);
     border-radius: 8px;
@@ -648,6 +669,43 @@ header h1 {
 
 .console-line:last-child {
     color: var(--accent-primary);
+}
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 15, 35, 0.78);
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 1200;
+}
+
+.modal-overlay[hidden] {
+    display: none;
+}
+
+.modal-content {
+    width: min(1100px, 100%);
+    max-height: 88vh;
+    background: rgba(26, 26, 46, 0.96);
+    border: 1px solid var(--border-color);
+    border-radius: 18px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+    padding: 24px;
+}
+
+.console-modal-content .modal-header {
+    margin-bottom: 16px;
+}
+
+.console-output-large {
+    min-height: 60vh;
+    max-height: 68vh;
+    font-size: 0.95rem;
+    padding: 20px;
 }
 
 .btn-small {

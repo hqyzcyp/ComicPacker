@@ -113,7 +113,10 @@
 
         <!-- 控制台输出 -->
         <div class="panel console-panel">
-            <h2>🖥️ 控制台输出</h2>
+            <div class="panel-header">
+                <h2>🖥️ 控制台输出</h2>
+                <button type="button" class="btn-small" id="expand-console-btn">🔍 放大查看</button>
+            </div>
             <div class="console-output" id="console-output">
                 <div class="console-line">等待任务输出...</div>
             </div>
@@ -138,6 +141,18 @@
             </div>
             <div class="job-list" id="job-list">
                 <div class="empty-state">暂无任务记录</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="console-modal" hidden>
+        <div class="modal-content console-modal-content" role="dialog" aria-modal="true" aria-labelledby="console-modal-title">
+            <div class="modal-header">
+                <h2 id="console-modal-title">🖥️ 转换日志大窗口</h2>
+                <button type="button" class="btn-small" id="close-console-modal-btn">✖ 关闭</button>
+            </div>
+            <div class="console-output console-output-large" id="console-output-modal">
+                <div class="console-line">等待任务输出...</div>
             </div>
         </div>
     </div>

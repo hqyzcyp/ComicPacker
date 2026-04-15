@@ -2,11 +2,21 @@
 
 // Configuration
 const DEFAULT_PATH_KEY = 'comicpacker_default_path';
+const ACTIVE_JOB_STATUSES = new Set(['pending', 'running']);
+const FAST_CONSOLE_POLL_MS = 1000;
+const IDLE_CONSOLE_POLL_MS = 4000;
+const HIDDEN_CONSOLE_POLL_MS = 15000;
 
 // State management
 let currentPath = '.';
 let selectedFolder = null;
 let selectedFolderAnalysis = null;
+let latestConsoleOutput = [];
+let lastConsoleSignature = '';
+let consolePollTimer = null;
+let consolePollInFlight = false;
+let hasActiveJobs = false;
+let lastFocusedElement = null;
 
 // DOM elements
 const fileList = document.getElementById('file-list');
@@ -23,6 +33,11 @@ const comicNameHelp = document.getElementById('comic-name-help');
 const outputInput = document.getElementById('output');
 const outputNamePreview = document.getElementById('output-name-preview');
 const outputPreviewHelp = document.getElementById('output-preview-help');
+const consoleOutputPanel = document.getElementById('console-output');
+const expandConsoleBtn = document.getElementById('expand-console-btn');
+const consoleModal = document.getElementById('console-modal');
+const closeConsoleModalBtn = document.getElementById('close-console-modal-btn');
+const consoleOutputModal = document.getElementById('console-output-modal');
 
 // Settings elements
 const setDefaultBtn = document.getElementById('set-default-btn');
@@ -42,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadJobs();
     setupEventListeners();
     updateOutputPreview();
+    renderConsoleOutputs([]);
 });
 
 // Settings management
@@ -73,6 +89,15 @@ function showNotification(message, type = 'info') {
         notification.classList.remove('show');
         setTimeout(() => notification.remove(), 300);
     }, 3000);
+}
+
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function sanitizePathComponent(value) {
@@ -171,6 +196,97 @@ function applyFolderAnalysis(data) {
     updateOutputFolderSuggestion(true);
 }
 
+function renderConsoleOutput(target, lines) {
+    if (!target) {
+        return;
+    }
+
+    const wasNearBottom = (target.scrollHeight - target.scrollTop - target.clientHeight) < 24;
+    const safeLines = Array.isArray(lines) ? lines : [];
+
+    target.innerHTML = safeLines.length > 0
+        ? safeLines.map(line => `<div class="console-line">${escapeHtml(line)}</div>`).join('')
+        : '<div class="console-line">等待任务输出...</div>';
+
+    if (wasNearBottom || safeLines.length <= 1) {
+        target.scrollTop = target.scrollHeight;
+    }
+}
+
+function getConsoleSignature(lines) {
+    return Array.isArray(lines) ? lines.join('\n') : '';
+}
+
+function renderConsoleOutputs(lines, options = {}) {
+    const safeLines = Array.isArray(lines) ? [...lines] : [];
+    latestConsoleOutput = safeLines;
+
+    const nextSignature = getConsoleSignature(safeLines);
+    if (!options.force && nextSignature === lastConsoleSignature) {
+        return;
+    }
+
+    lastConsoleSignature = nextSignature;
+    renderConsoleOutput(consoleOutputPanel, safeLines);
+    renderConsoleOutput(consoleOutputModal, safeLines);
+}
+
+function getConsolePollDelay() {
+    if (document.hidden) {
+        return HIDDEN_CONSOLE_POLL_MS;
+    }
+
+    return (hasActiveJobs || !consoleModal.hidden)
+        ? FAST_CONSOLE_POLL_MS
+        : IDLE_CONSOLE_POLL_MS;
+}
+
+function scheduleConsolePolling(delay = getConsolePollDelay()) {
+    if (consolePollTimer) {
+        clearTimeout(consolePollTimer);
+    }
+
+    consolePollTimer = window.setTimeout(() => {
+        loadConsoleOutput();
+    }, delay);
+}
+
+function syncActiveJobState(jobs) {
+    const nextHasActiveJobs = Array.isArray(jobs)
+        && jobs.some(job => ACTIVE_JOB_STATUSES.has(job.status));
+
+    if (nextHasActiveJobs === hasActiveJobs) {
+        return;
+    }
+
+    hasActiveJobs = nextHasActiveJobs;
+    scheduleConsolePolling(hasActiveJobs ? 0 : getConsolePollDelay());
+}
+
+function openConsoleModal() {
+    lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    consoleModal.hidden = false;
+    document.body.classList.add('modal-open');
+    renderConsoleOutputs(latestConsoleOutput, { force: true });
+    closeConsoleModalBtn.focus();
+    scheduleConsolePolling(0);
+}
+
+function closeConsoleModal() {
+    if (consoleModal.hidden) {
+        return;
+    }
+
+    consoleModal.hidden = true;
+    document.body.classList.remove('modal-open');
+
+    if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+        lastFocusedElement.focus();
+    }
+
+    scheduleConsolePolling();
+}
+
 // Event listeners
 function setupEventListeners() {
     // Settings controls
@@ -220,6 +336,21 @@ function setupEventListeners() {
 
     outputInput.addEventListener('input', () => {
         outputInput.dataset.autoManaged = 'false';
+    });
+
+    expandConsoleBtn.addEventListener('click', openConsoleModal);
+    closeConsoleModalBtn.addEventListener('click', closeConsoleModal);
+
+    consoleModal.addEventListener('click', (event) => {
+        if (event.target === consoleModal) {
+            closeConsoleModal();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && !consoleModal.hidden) {
+            closeConsoleModal();
+        }
     });
 
     // Form submission
@@ -414,6 +545,8 @@ async function startConversion() {
 
         // Show success notification
         showNotification(`✓ 任务已提交: ${data.job_id.substring(0, 8)}`, 'success');
+        hasActiveJobs = true;
+        scheduleConsolePolling(0);
 
         // Refresh job list to show new job
         loadJobs();
@@ -486,6 +619,7 @@ async function loadJobs() {
         }
 
         const data = await response.json();
+        syncActiveJobState(data.jobs);
         renderJobList(data.jobs);
     } catch (error) {
         console.error('Error loading jobs:', error);
@@ -634,6 +768,13 @@ setInterval(() => {
 
 // Load and update console output
 async function loadConsoleOutput() {
+    if (consolePollInFlight) {
+        scheduleConsolePolling();
+        return;
+    }
+
+    consolePollInFlight = true;
+
     try {
         const response = await fetch('/api/console-output');
         if (!response.ok) {
@@ -641,20 +782,13 @@ async function loadConsoleOutput() {
         }
 
         const data = await response.json();
-        const consoleOutput = document.getElementById('console-output');
-
-        if (consoleOutput) {
-            if (data.output && data.output.length > 0) {
-                consoleOutput.innerHTML = data.output
-                    .map(line => `<div class="console-line">${line}</div>`)
-                    .join('');
-            } else {
-                consoleOutput.innerHTML = '<div class="console-line">等待任务输出...</div>';
-            }
-        }
+        renderConsoleOutputs(data.output || []);
 
     } catch (error) {
         console.error('Error loading console output:', error);
+    } finally {
+        consolePollInFlight = false;
+        scheduleConsolePolling();
     }
 }
 
@@ -663,11 +797,10 @@ setInterval(() => {
     loadSystemStats();
 }, 1000);
 
-// Auto-refresh console output every 1 second
-setInterval(() => {
-    loadConsoleOutput();
-}, 1000);
-
 // Load system stats and console output on page load
 loadSystemStats();
 loadConsoleOutput();
+
+document.addEventListener('visibilitychange', () => {
+    scheduleConsolePolling(document.hidden ? HIDDEN_CONSOLE_POLL_MS : 0);
+});
