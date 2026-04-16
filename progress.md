@@ -470,3 +470,139 @@
   - progress.md
 
 - **Cleanup:** 已删除 `/tmp` 与 `/mnt` 下用于本次 benchmark 的临时脚本和输出目录，仅保留 planning files 中的结论与数据。
+
+### Session Addendum: Codex hook JSON error diagnosis
+- **Status:** complete
+- **Actions taken:**
+  - 读取 `~/.codex/hooks.json` 与全局 hook 脚本。
+  - 确认当前项目不存在 `.codex/hooks/` 本地覆盖，因此会回退到 `~/.codex/hooks/*`。
+  - 直接执行 `~/.codex/hooks/user-prompt-submit.sh` 与 `~/.codex/hooks/session-start.sh`，复现 stdout 为纯文本计划摘要而非 JSON。
+- **Conclusion:**
+  - 报错根因是 `SessionStart` / `UserPromptSubmit` hook 被配置为直接执行 shell 脚本，但脚本输出的是纯文本，不是 Codex 期望的 JSON。
+
+### Session Addendum: project-local hook JSON fix
+- **Status:** complete
+- **Actions taken:**
+  - 重写 `task_plan.md` 为当前 hook 修复任务。
+  - 创建 `.codex/hooks/emit_context_hook.py`、`.codex/hooks/planning-context.sh`、`.codex/hooks/session-start.sh`、`.codex/hooks/user-prompt-submit.sh`。
+  - 使用 `sh -n` 与 `python3 -m py_compile` 完成本地语法检查。
+  - 使用 `~/.codex/hooks.json` 中的同款命令在当前仓库执行两个 hook，并用 `json.loads` 验证输出可解析。
+- **Files created/modified:**
+  - .codex/hooks/emit_context_hook.py (created)
+  - .codex/hooks/planning-context.sh (created)
+  - .codex/hooks/session-start.sh (created)
+  - .codex/hooks/user-prompt-submit.sh (created)
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Additional Test Results: project-local hook JSON fix
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Shell / Python syntax | `sh -n .codex/hooks/*.sh && python3 -m py_compile .codex/hooks/emit_context_hook.py` | 本地 hook 无语法错误 | `syntax OK` | ✓ |
+| UserPromptSubmit local command | `sh .codex/hooks/user-prompt-submit.sh 2>/dev/null || sh "$HOME/.codex/hooks/user-prompt-submit.sh" 2>/dev/null || true` | 输出合法 JSON | `parsed=True, event=UserPromptSubmit, additionalContext=True` | ✓ |
+| SessionStart local command | `sh .codex/hooks/session-start.sh 2>/dev/null || sh "$HOME/.codex/hooks/session-start.sh" 2>/dev/null || true` | 输出合法 JSON | `parsed=True, event=SessionStart, additionalContext=True` | ✓ |
+
+
+### Session Addendum: UI 布局重构与前端审查启动（2026-04-16）
+- **Status:** in_progress
+- **Actions taken:**
+  - 根据用户新需求切换当前 planning 任务，重写 `task_plan.md` 为 UI 重构/审查任务。
+  - 读取 `planning-with-files` 与 `ai-slop-cleaner` 技能说明，明确采用“先审查与回归保护，再分步清理”的流程。
+  - 检查仓库状态，确认当前未提交变更主要是 planning files 与 `.codex/` 本地 hook。
+  - 尝试使用 `omx explore` 做只读映射，但因环境缺少 `cargo` / explore harness 失败，已回退到直接源码审查。
+  - 初步阅读 `templates/index.html`、`static/app.js`、`static/style.css`，开始建立 UI 布局与状态流地图。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+- **Audit notes added:**
+  - 已补记第一轮 UI 审查结论，覆盖 HTML 结构、前端脚本职责分布、后端 UI API 契约与现有测试空白。
+- **Baseline verification:**
+  - 运行 `python3 -m py_compile web_server.py main.py` 与 `node --check static/app.js`，语法检查通过。
+  - 运行 `python3 -m unittest discover -s tests -p 'test_*.py'` 时失败，根因是系统 Python 缺少 `reportlab` / `flask`，后续验证需切回项目既有 conda `comic` 环境。
+- **Conda baseline recovered:**
+  - 使用 `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'`，11 个测试全部通过，后续验证统一切换到该环境执行。
+- **Regression lock added:**
+  - 新增 `tests/test_web_ui_api.py`，覆盖 `detect-mode` UI 契约、非法 mode 拒绝、clear history 计数三类行为。
+  - 首次运行新测试后，确认存在 2 个真实失败：`unsupported-mode` 被错误接受、`/api/jobs/clear` 清理计数永远为 0。
+
+### Session Addendum: UI 布局重构与前端审查完成（2026-04-16）
+- **Status:** complete
+- **Actions taken:**
+  - 重构 `templates/index.html`，引入真实页头、双层网格布局、分组表单区块和更清晰的控制台/历史面板结构。
+  - 整理 `static/style.css`：新增布局样式，移除/合并重复或过时规则，统一按钮与系统状态色彩表达。
+  - 重构 `static/app.js`：抽出统一请求 helper，把部分 `style.display` 改为 `hidden` 控制，并将文件列表/任务列表渲染从 `innerHTML` 改为 DOM API。
+  - 修复后端接口隐藏问题：`/api/jobs` 现在拒绝非法模式；`/api/jobs/clear` 正确返回被清理的历史数量。
+  - 新增 `tests/test_web_ui_api.py` 保护 UI 依赖的 API 契约与隐藏逻辑修复。
+  - 完成验证：`node --check static/app.js`、`python3 -m py_compile web_server.py main.py`、`conda run -n comic python -m unittest discover -s tests -p 'test_*.py'`，共 14 个测试通过。
+- **Files created/modified:**
+  - templates/index.html
+  - static/style.css
+  - static/app.js
+  - web_server.py
+  - tests/test_web_ui_api.py (created)
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Session Addendum: Web 页面布局与 PDF 保留逻辑调整启动（2026-04-16）
+- **Status:** in_progress
+- **Actions taken:**
+  - 读取 `planning-with-files` 技能与当前 planning files，切换到本轮“Web 页面布局 + PDF 保留逻辑”任务。
+  - 审查 `templates/index.html`、`static/style.css`、`static/app.js`、`web_server.py`、`main.py` 中与四面板布局和 MOBI/PDF 参数流直接相关的代码。
+  - 明确本轮核心变更：统一四面板自适应网格、压缩表单布局、移除命名来源行、为 select 加 tooltip 说明、为转换任务增加 `keep_pdf` 参数及输出清理逻辑。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+- **Open questions:**
+  - `keep_pdf` 是否在 PDF->MOBI 模式下也允许操作；当前倾向允许并在完成后删除输出布局中的 `pdf/` 子目录。
+
+### Session Addendum: Web 页面布局与 PDF 保留逻辑调整完成（2026-04-16）
+- **Status:** complete
+- **Actions taken:**
+  - 将页面四块主面板改为单一 `workspace-grid` 自适应布局，使上下同列宽、左右同行高。
+  - 重构配置表单为 `label + control` 紧凑行布局，为转换模式与 Kindle 设备 select 增加 hover 说明按钮。
+  - 删除“命名来源”展示行，并同步清理 `static/app.js` 中对应 DOM 引用与状态更新。
+  - 新增“保留 PDF 格式”选项，并实现其与“转换为 MOBI 格式”的联动：未启用 MOBI 时强制保留 PDF，启用后可改为仅保留 MOBI。
+  - 在 `web_server.py` 中加入 `keep_pdf` 参数归一化与 worker 透传，在 `main.py` 中加入公共 `cleanup_pdf_output_dir()` 清理逻辑。
+  - 新增 `tests/test_output_retention.py`，并扩充 `tests/test_web_ui_api.py`，覆盖 API 参数约束与 PDF 目录保留/删除行为。
+- **Files created/modified:**
+  - templates/index.html
+  - static/style.css
+  - static/app.js
+  - web_server.py
+  - main.py
+  - tests/test_web_ui_api.py
+  - tests/test_output_retention.py (created)
+  - task_plan.md
+  - findings.md
+  - progress.md
+- **Verification:**
+  - `node --check static/app.js`
+  - `python3 -m py_compile web_server.py main.py tests/test_web_ui_api.py tests/test_output_retention.py`
+  - `conda run -n comic python -m unittest tests.test_web_ui_api tests.test_output_retention`
+  - `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'`
+- **Result:**
+  - 18 个测试全部通过。
+
+### Session Addendum: 说明按钮化与配置区压缩（2026-04-16）
+- **Status:** complete
+- **Actions taken:**
+  - 根据用户截图反馈，将转换配置区中原本占用额外高度的说明文本全部改为 `?` 悬浮说明按钮。
+  - 为批次大小、漫画输出名、输出名预览、输出目录、输出格式、Kindle 设备统一提供 tooltip 说明结构。
+  - 压缩 `form-section`、`form-row`、输入框、输出预览和 checkbox chip 的 padding / min-height，减少“转换模式”这类单行子模块的空白占用。
+  - 保持 `comic-name-help`、`output-preview-help`、`format-options-help` 的原有 JS 动态更新能力，仅把承载节点改为 tooltip 内容。
+  - 记录当前视觉整改依据到 `.omx/state/web-ui/ralph-progress.json`。
+- **Files created/modified:**
+  - templates/index.html
+  - static/style.css
+  - findings.md
+  - progress.md
+  - .omx/state/web-ui/ralph-progress.json
+- **Verification:**
+  - `node --check static/app.js`
+  - `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'`
+- **Result:**
+  - 18 个测试全部通过。

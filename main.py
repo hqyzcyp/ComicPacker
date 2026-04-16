@@ -221,6 +221,21 @@ def prepare_output_layout(output_root: str, folder_path: str, comic_name: str = 
     )
 
 
+def cleanup_pdf_output_dir(pdf_output_dir: str, keep_pdf: bool = True) -> None:
+    """
+    在不保留 PDF 时清理输出布局中的 pdf 子目录。
+    """
+    if keep_pdf:
+        return
+
+    pdf_dir = Path(pdf_output_dir)
+    if not pdf_dir.exists():
+        return
+
+    shutil.rmtree(pdf_dir)
+    print(f"已删除 PDF 输出目录: {pdf_dir}")
+
+
 
 def get_sorted_zip_files(folder_path: str) -> List[str]:
     """
@@ -819,7 +834,7 @@ def process_chapter_into_canvas(c: canvas.Canvas, zip_path: str,
 def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: str = './output',
                         convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
                         progress_callback: Optional[Callable] = None,
-                        comic_name: str = ""):
+                        comic_name: str = "", keep_pdf: bool = True):
     """
     按书打包：每个ZIP压缩包下有若干文件夹（章节），将这些章节打包成一个PDF
     - 使用最小章节的第一张图片作为整本书的封面
@@ -832,6 +847,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
         progress_callback: 进度回调函数(可选)
+        keep_pdf: 转换 MOBI 后是否保留 pdf 子目录(默认True)
     """
     resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
         output_folder,
@@ -858,6 +874,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     print(f"规范漫画名: {resolved_comic_name}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
+        print(f"保留PDF目录: {'是' if keep_pdf else '否（完成后删除 pdf 子目录）'}")
     
     # 报告初始进度
     if progress_callback:
@@ -930,6 +947,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
     print(f"\n所有书籍打包完成！共处理 {len(zip_files)} 本书")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
+        cleanup_pdf_output_dir(pdf_output_dir, keep_pdf=keep_pdf)
     
     # 报告完成
     if progress_callback:
@@ -944,7 +962,7 @@ def pack_comics_by_book(folder_path: str, pdf_prefix: str = "", output_folder: s
 def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str = "",
                         output_folder: str = './output', convert_to_mobi: bool = False,
                         kindle_profile: str = 'KPW5', progress_callback: Optional[Callable] = None,
-                        comic_name: str = ""):
+                        comic_name: str = "", keep_pdf: bool = True):
     """
     主函数:将文件夹中的ZIP文件按批次打包成PDF
     
@@ -956,6 +974,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
         progress_callback: 进度回调函数(可选)
+        keep_pdf: 转换 MOBI 后是否保留 pdf 子目录(默认True)
     """
     resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
         output_folder,
@@ -981,6 +1000,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     print(f"规范漫画名: {resolved_comic_name}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
+        print(f"保留PDF目录: {'是' if keep_pdf else '否（完成后删除 pdf 子目录）'}")
     
     # 分批处理
     total_batches = (len(zip_files) + batch_size - 1) // batch_size
@@ -1020,6 +1040,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
     print(f"\n✓ 全部完成! 共创建 {total_batches} 个PDF文件")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
+        cleanup_pdf_output_dir(pdf_output_dir, keep_pdf=keep_pdf)
     
     # 报告完成
     if progress_callback:
@@ -1033,7 +1054,7 @@ def pack_comics_to_pdf(folder_path: str, batch_size: int = 10, pdf_prefix: str =
 def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: str = './output',
                         convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
                         progress_callback: Optional[Callable] = None,
-                        comic_name: str = ""):
+                        comic_name: str = "", keep_pdf: bool = True):
     """
     CBZ转PDF模式：将文件夹中的每个CBZ文件转换为单独的PDF
     使用第一张图片作为封面，确保在Kindle上正确显示
@@ -1046,6 +1067,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
         convert_to_mobi: 是否转换为MOBI格式(默认False)
         kindle_profile: Kindle设备配置文件(默认'KPW5')
         progress_callback: 进度回调函数(可选)
+        keep_pdf: 转换 MOBI 后是否保留 pdf 子目录(默认True)
     """
     resolved_comic_name, comic_output_dir, pdf_output_dir, mobi_output_dir = prepare_output_layout(
         output_folder,
@@ -1071,6 +1093,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     print(f"规范漫画名: {resolved_comic_name}")
     if convert_to_mobi:
         print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
+        print(f"保留PDF目录: {'是' if keep_pdf else '否（完成后删除 pdf 子目录）'}")
     
     # 报告初始进度
     if progress_callback:
@@ -1189,6 +1212,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
     print(f"漫画输出目录: {comic_output_dir}")
     if convert_to_mobi:
         print(f"  MOBI转换已完成")
+        cleanup_pdf_output_dir(pdf_output_dir, keep_pdf=keep_pdf)
     
     # 报告完成
     if progress_callback:
@@ -1201,7 +1225,7 @@ def convert_cbz_to_pdf(folder_path: str, cbz_prefix: str = "", output_folder: st
 def convert_pdf_folder_to_mobi(folder_path: str, output_folder: str = './output',
                                kindle_profile: str = 'KPW5',
                                progress_callback: Optional[Callable] = None,
-                               comic_name: str = ""):
+                               comic_name: str = "", keep_pdf: bool = True):
     """
     PDF转MOBI模式：将文件夹中的PDF批量转换为MOBI，
     输出到 <输出根目录>/<漫画名>/mobi。
@@ -1224,6 +1248,7 @@ def convert_pdf_folder_to_mobi(folder_path: str, output_folder: str = './output'
     print(f"MOBI输出目录: {mobi_output_dir}")
     print(f"规范漫画名: {resolved_comic_name}")
     print(f"MOBI转换: 启用 (设备配置: {kindle_profile})")
+    print(f"保留PDF目录: {'是' if keep_pdf else '否（完成后删除 pdf 子目录）'}")
 
     if progress_callback:
         progress_callback('scanning', 0, len(pdf_files), f'找到 {len(pdf_files)} 个PDF文件')
@@ -1246,6 +1271,7 @@ def convert_pdf_folder_to_mobi(folder_path: str, output_folder: str = './output'
     print(f"\n{'='*50}")
     print(f"✓ PDF->MOBI 转换完成! 成功: {success_count}/{len(pdf_files)}")
     print(f"漫画输出目录: {comic_output_dir}")
+    cleanup_pdf_output_dir(pdf_output_dir, keep_pdf=keep_pdf)
 
     if progress_callback:
         progress_callback(

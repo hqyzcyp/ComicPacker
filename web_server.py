@@ -48,6 +48,7 @@ MAX_CONSOLE_LINES = 20  # 最多保留20行输出
 COMIC_FILE_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
 CONVERTIBLE_COMIC_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
 DOWNLOADABLE_FILE_EXTENSIONS = COMIC_FILE_EXTENSIONS | {'.mobi', '.epub'}
+SUPPORTED_WEB_MODES = {'batch', 'book', 'cbz', 'pdf'}
 FOLDER_METADATA_BLACKLIST = {
     '完结', '未完', '连载中', '已完结', '未完结', '电子版', '掃圖', '扫图', '生肉',
     '熟肉', 'pdf', 'zip', 'cbz', 'bili', '哔哩哔哩', '合集', '单行本'
@@ -94,6 +95,22 @@ def get_web_worker_count() -> int:
             f"fallback to {default_workers}"
         )
         return default_workers
+
+
+def coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    normalized = str(value).strip().lower()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off', ''}:
+        return False
+    return default
 
 
 def is_job_cancelled(job_id: str) -> bool:
@@ -574,6 +591,7 @@ def process_job(job_id: str, worker_name: str):
                     pdf_prefix=params.get('prefix', ''),
                     output_folder=params.get('output', './output'),
                     convert_to_mobi=params.get('convert_to_mobi', False),
+                    keep_pdf=params.get('keep_pdf', True),
                     kindle_profile=params.get('kindle_profile', 'KPW5'),
                     progress_callback=tracker.update,
                     comic_name=comic_name
@@ -584,6 +602,7 @@ def process_job(job_id: str, worker_name: str):
                     pdf_prefix=params.get('prefix', ''),
                     output_folder=params.get('output', './output'),
                     convert_to_mobi=params.get('convert_to_mobi', False),
+                    keep_pdf=params.get('keep_pdf', True),
                     kindle_profile=params.get('kindle_profile', 'KPW5'),
                     progress_callback=tracker.update,
                     comic_name=comic_name
@@ -594,6 +613,7 @@ def process_job(job_id: str, worker_name: str):
                     cbz_prefix=params.get('prefix', ''),
                     output_folder=params.get('output', './output'),
                     convert_to_mobi=params.get('convert_to_mobi', False),
+                    keep_pdf=params.get('keep_pdf', True),
                     kindle_profile=params.get('kindle_profile', 'KPW5'),
                     progress_callback=tracker.update,
                     comic_name=comic_name
@@ -604,7 +624,8 @@ def process_job(job_id: str, worker_name: str):
                     output_folder=params.get('output', './output'),
                     kindle_profile=params.get('kindle_profile', 'KPW5'),
                     progress_callback=tracker.update,
-                    comic_name=comic_name
+                    comic_name=comic_name,
+                    keep_pdf=params.get('keep_pdf', True)
                 )
             else:
                 raise ValueError(f'不支持的模式: {mode}')
@@ -739,52 +760,79 @@ start_worker_pool()
 
 def pack_comics_to_pdf_with_progress(folder_path: str, batch_size: int = 10, 
                                      pdf_prefix: str = "", output_folder: str = './output',
-                                     convert_to_mobi: bool = False, kindle_profile: str = 'KPW5',
+                                     convert_to_mobi: bool = False, keep_pdf: bool = True,
+                                     kindle_profile: str = 'KPW5',
                                      progress_callback: Optional[Callable] = None,
                                      comic_name: str = ""):
     """批次模式转换（带进度回调）"""
-    pack_comics_to_pdf(folder_path, batch_size, pdf_prefix, output_folder,
-                      convert_to_mobi, kindle_profile, progress_callback,
-                      comic_name=comic_name)
+    pack_comics_to_pdf(
+        folder_path,
+        batch_size=batch_size,
+        pdf_prefix=pdf_prefix,
+        output_folder=output_folder,
+        convert_to_mobi=convert_to_mobi,
+        kindle_profile=kindle_profile,
+        progress_callback=progress_callback,
+        comic_name=comic_name,
+        keep_pdf=keep_pdf
+    )
 
 
 def pack_comics_by_book_with_progress(folder_path: str, pdf_prefix: str = "",
                                       output_folder: str = './output',
-                                      convert_to_mobi: bool = False, 
+                                      convert_to_mobi: bool = False,
+                                      keep_pdf: bool = True,
                                       kindle_profile: str = 'KPW5',
                                       progress_callback: Optional[Callable] = None,
                                       comic_name: str = ""):
     """按书打包模式（带进度回调）"""
     # 直接调用main.py中的函数，它会通过progress_callback报告所有进度
-    pack_comics_by_book(folder_path, pdf_prefix, output_folder, 
-                       convert_to_mobi, kindle_profile, progress_callback,
-                       comic_name=comic_name)
+    pack_comics_by_book(
+        folder_path,
+        pdf_prefix=pdf_prefix,
+        output_folder=output_folder,
+        convert_to_mobi=convert_to_mobi,
+        kindle_profile=kindle_profile,
+        progress_callback=progress_callback,
+        comic_name=comic_name,
+        keep_pdf=keep_pdf
+    )
 
 
 def convert_cbz_to_pdf_with_progress(folder_path: str, cbz_prefix: str = "",
                                      output_folder: str = './output',
                                      convert_to_mobi: bool = False,
+                                     keep_pdf: bool = True,
                                      kindle_profile: str = 'KPW5',
                                      progress_callback: Optional[Callable] = None,
                                      comic_name: str = ""):
     """CBZ转PDF模式（带进度回调）"""
-    convert_cbz_to_pdf(folder_path, cbz_prefix, output_folder, 
-                        convert_to_mobi, kindle_profile, progress_callback,
-                        comic_name=comic_name)
+    convert_cbz_to_pdf(
+        folder_path,
+        cbz_prefix=cbz_prefix,
+        output_folder=output_folder,
+        convert_to_mobi=convert_to_mobi,
+        kindle_profile=kindle_profile,
+        progress_callback=progress_callback,
+        comic_name=comic_name,
+        keep_pdf=keep_pdf
+    )
 
 
 def convert_pdf_folder_to_mobi_with_progress(folder_path: str,
                                              output_folder: str = './output',
                                              kindle_profile: str = 'KPW5',
                                              progress_callback: Optional[Callable] = None,
-                                             comic_name: str = ""):
+                                             comic_name: str = "",
+                                             keep_pdf: bool = True):
     """PDF转MOBI模式（带进度回调）"""
     convert_pdf_folder_to_mobi(
         folder_path,
-        output_folder,
-        kindle_profile,
-        progress_callback,
-        comic_name=comic_name
+        output_folder=output_folder,
+        kindle_profile=kindle_profile,
+        progress_callback=progress_callback,
+        comic_name=comic_name,
+        keep_pdf=keep_pdf
     )
 
 
@@ -1034,6 +1082,7 @@ def clear_jobs():
     """清除所有已完成、失败和取消的任务"""
     try:
         with jobs_lock:
+            original_count = len(jobs)
             # 只保留正在运行和等待中的任务
             jobs_to_keep = {
                 job_id: job for job_id, job in jobs.items()
@@ -1042,7 +1091,7 @@ def clear_jobs():
             jobs.clear()
             jobs.update(jobs_to_keep)
             
-            cleared_count = len(jobs) - len(jobs_to_keep)
+            cleared_count = original_count - len(jobs_to_keep)
             print(f"[API] Cleared {cleared_count} completed jobs")
             
             return jsonify({
@@ -1067,6 +1116,21 @@ def create_job():
 
         folder_path = resolve_allowed_path(params['folder'], require_exists=True, require_dir=True)
         params['folder'] = str(folder_path)
+        params['mode'] = (params.get('mode') or 'book').strip()
+        params['convert_to_mobi'] = coerce_bool(params.get('convert_to_mobi'), False)
+        params['keep_pdf'] = coerce_bool(params.get('keep_pdf'), True)
+
+        if params['mode'] not in SUPPORTED_WEB_MODES:
+            return jsonify({'error': f'不支持的模式: {params["mode"]}'}), 400
+
+        if params['mode'] == 'batch' and 'batch_size' in params:
+            try:
+                params['batch_size'] = int(params['batch_size'])
+            except (TypeError, ValueError):
+                return jsonify({'error': 'batch_size 必须是整数'}), 400
+
+            if params['batch_size'] < 1:
+                return jsonify({'error': 'batch_size 必须大于 0'}), 400
 
         folder_analysis = analyze_comic_folder(params['folder'])
         comic_name = sanitize_output_component(params.get('comic_name', '').strip()) or folder_analysis.get('comic_name', '')
@@ -1076,6 +1140,8 @@ def create_job():
             params['prefix'] = comic_name
         if params.get('mode') == 'pdf':
             params['convert_to_mobi'] = True
+        if not params.get('convert_to_mobi'):
+            params['keep_pdf'] = True
 
         if not params.get('output'):
             params['output'] = load_app_config().get('output_folder', str(derive_output_folder_from_comic_folder(params['folder'])))

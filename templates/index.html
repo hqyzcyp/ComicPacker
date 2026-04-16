@@ -9,22 +9,36 @@
 </head>
 
 <body>
-    <div class="container">
-        <!-- <header>
-            <h1>📚 ComicPacker</h1>
-            <p class="subtitle">漫画转换工具 Web 界面</p>
-        </header> -->
+    <div class="container app-shell">
+        <header class="app-header">
+            <div>
+                <p class="app-kicker">ComicPacker Web</p>
+                <h1>漫画转换工作台</h1>
+                <p class="subtitle">在一个界面里完成目录浏览、模式识别、输出命名预览和任务追踪。</p>
+            </div>
+            <div class="app-meta">
+                <span class="meta-pill">目录沙箱 /mnt</span>
+                <span class="meta-pill">支持 ZIP / CBZ / PDF</span>
+                <span class="meta-pill">输出 PDF / MOBI</span>
+            </div>
+        </header>
 
-        <div class="main-grid">
-            <!-- 左侧：文件浏览器 -->
-            <div class="panel file-browser-panel">
-                <h2>📁 文件浏览器</h2>
+        <section class="workspace-grid">
+            <section class="panel panel--stretch file-browser-panel">
+                <div class="panel-heading">
+                    <div>
+                        <h2>📁 文件浏览器</h2>
+                        <p class="panel-description">选择漫画目录后，界面会自动读取文件示例并推荐转换模式。</p>
+                    </div>
+                </div>
 
                 <div class="current-path">
                     <input type="text" id="current-path" readonly>
-                    <button id="parent-btn" title="返回上级目录">⬆️</button>
-                    <button id="refresh-btn" title="刷新">🔄</button>
-                    <button id="set-default-btn" title="设为默认路径">📌</button>
+                    <div class="current-path-actions">
+                        <button id="parent-btn" type="button" title="返回上级目录">⬆️</button>
+                        <button id="refresh-btn" type="button" title="刷新">🔄</button>
+                        <button id="set-default-btn" type="button" title="设为默认路径">📌</button>
+                    </div>
                 </div>
                 <div class="file-list" id="file-list">
                     <div class="loading">加载中...</div>
@@ -38,113 +52,192 @@
                         <strong>首个文件:</strong>
                         <span id="first-file-display">未读取</span>
                     </div>
-                    <div class="selected-folder-row">
-                        <strong>命名来源:</strong>
-                        <span id="naming-source-display">等待选择文件夹</span>
+                </div>
+            </section>
+
+            <section class="panel panel--stretch config-panel">
+                <div class="panel-heading">
+                    <div>
+                        <h2>⚙️ 转换配置</h2>
+                        <p class="panel-description">配置输出根目录、命名规则和设备选项，再提交到后台 worker 执行。</p>
                     </div>
                 </div>
-            </div>
-
-            <!-- 右侧：配置和控制 -->
-            <div class="panel config-panel">
-                <h2>⚙️ 转换配置</h2>
-                <form id="conversion-form">
-                    <div class="form-group">
-                        <label for="mode">转换模式:</label>
-                        <select id="mode" name="mode">
-                            <option value="book">按书打包</option>
-                            <option value="cbz">按CBZ打包</option>
-                            <option value="pdf">PDF 转 MOBI</option>
-                            <option value="batch">按批次模式</option>
-                        </select>
-                        <small class="help-text">批次模式: 固定章节数打包 | 按书: 自动检测分书 | CBZ: 每个CBZ一个PDF | PDF: 批量转MOBI</small>
-                    </div>
-
-                    <div class="form-group" id="batch-size-group" style="display: none;">
-                        <label for="batch-size">批次大小:</label>
-                        <div class="slider-container">
-                            <input type="range" id="batch-size" name="batch_size" min="1" max="50" value="10">
-                            <span id="batch-size-value">10</span> 章节/PDF
+                <form id="conversion-form" class="conversion-form">
+                    <section class="form-section">
+                        <div class="form-row">
+                            <label class="field-label" for="mode">转换模式</label>
+                            <div class="field-control">
+                                <div class="control-with-help">
+                                    <select id="mode" name="mode">
+                                        <option value="book">按书打包（每个ZIP一本书）</option>
+                                        <option value="cbz">按CBZ打包（每个CBZ一本书）</option>
+                                        <option value="batch">按批次打包（固定批次）</option>
+                                        <option value="pdf">PDF转换MOBI</option>
+                                    </select>
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看转换模式说明">?</button>
+                                        <div class="tooltip-content">
+                                            <p><strong>按书打包</strong>：每个 ZIP 识别为一本书并输出一个 PDF。</p>
+                                            <p><strong>按CBZ打包</strong>：每个 CBZ 输出一个 PDF。</p>
+                                            <p><strong>按批次打包</strong>：按固定批次章节数合并输出。</p>
+                                            <p><strong>PDF转换MOBI</strong>：把现有 PDF 批量转换为 MOBI。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                    </div>
 
-                    <div class="form-group">
-                        <label for="comic-name">漫画输出名:</label>
-                        <input type="text" id="comic-name" name="comic_name" placeholder="自动识别，可手动修改">
-                        <small class="help-text" id="comic-name-help">会优先从首个文件名推断漫画名，输出文件将尽量按“漫画名 Vol.xx”命名。</small>
-                    </div>
+                        <div class="form-row" id="batch-size-group" hidden>
+                            <label class="field-label" for="batch-size">批次大小</label>
+                            <div class="field-control">
+                                <div class="control-with-help control-with-help--align-top">
+                                    <div class="slider-container">
+                                        <input type="range" id="batch-size" name="batch_size" min="1" max="50" value="10">
+                                        <span id="batch-size-value">10</span> 章节/PDF
+                                    </div>
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看批次大小说明">?</button>
+                                        <div class="tooltip-content">
+                                            <p>按批次打包时，控制每个 PDF 里固定合并多少章节。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
 
-                    <div class="form-group">
-                        <label>输出名预览:</label>
-                        <div class="output-preview" id="output-name-preview">漫画名 Vol.01</div>
-                        <small class="help-text" id="output-preview-help">预览格式：漫画名 Vol.01</small>
-                    </div>
+                    <section class="form-section form-section-highlight">
+                        <div class="form-row">
+                            <label class="field-label" for="comic-name">漫画输出名</label>
+                            <div class="field-control">
+                                <div class="control-with-help">
+                                    <input type="text" id="comic-name" name="comic_name" placeholder="自动识别，可手动修改">
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看漫画输出名说明">?</button>
+                                        <div class="tooltip-content" id="comic-name-help">会优先从首个文件名推断漫画名，输出文件将尽量按“漫画名 Vol.xx”命名。</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
 
-                    <div class="form-group">
-                        <label for="output">输出目录:</label>
-                        <input type="text" id="output" name="output" value="./output" placeholder="./output">
-                        <small class="help-text">这里填写输出根目录；实际结果会写入 <code>漫画名/pdf</code> 与 <code>漫画名/mobi</code> 子目录。</small>
-                    </div>
+                        <div class="form-row">
+                            <span class="field-label">输出名预览</span>
+                            <div class="field-control">
+                                <div class="control-with-help">
+                                    <div class="output-preview" id="output-name-preview">漫画名 Vol.01</div>
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看输出名预览说明">?</button>
+                                        <div class="tooltip-content" id="output-preview-help">预览格式：漫画名 Vol.01</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
 
-                    <div class="form-group checkbox-group" id="convert-to-mobi-group">
-                        <label>
-                            <input type="checkbox" id="convert-to-mobi" name="convert_to_mobi" checked>
-                            转换为 MOBI 格式
-                        </label>
-                    </div>
+                    <section class="form-section">
+                        <div class="form-row">
+                            <label class="field-label" for="output">输出目录</label>
+                            <div class="field-control">
+                                <div class="control-with-help">
+                                    <input type="text" id="output" name="output" value="./output" placeholder="./output">
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看输出目录说明">?</button>
+                                        <div class="tooltip-content">
+                                            <p>这里填写输出根目录，结果会写入对应漫画目录下的 <code>pdf</code> 与 <code>mobi</code> 子目录。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
 
-                    <div class="form-group" id="kindle-profile-group">
-                        <label for="kindle-profile">Kindle 设备:</label>
-                        <select id="kindle-profile" name="kindle_profile">
-                            <option value="KPW5" selected>Kindle Paperwhite 5</option>
-                            <option value="KPW">Kindle Paperwhite</option>
-                            <option value="KV">Kindle Voyage</option>
-                            <option value="KO">Kindle Oasis</option>
-                            <option value="K11">Kindle 11th Gen</option>
-                            <option value="KS">Kindle Scribe</option>
-                        </select>
-                    </div>
+                        <div class="form-row">
+                            <span class="field-label">输出格式</span>
+                            <div class="field-control">
+                                <div class="control-with-help control-with-help--align-top">
+                                    <div class="checkbox-inline-group">
+                                        <label class="checkbox-chip" id="keep-pdf-group">
+                                            <input type="checkbox" id="keep-pdf" name="keep_pdf" checked>
+                                            保留 PDF 格式
+                                        </label>
+                                        <label class="checkbox-chip" id="convert-to-mobi-group">
+                                            <input type="checkbox" id="convert-to-mobi" name="convert_to_mobi" checked>
+                                            转换为 MOBI 格式
+                                        </label>
+                                    </div>
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看输出格式说明">?</button>
+                                        <div class="tooltip-content" id="format-options-help">默认保留 PDF；开启 MOBI 后可按需只保留 MOBI 文件夹。</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-row" id="kindle-profile-group">
+                            <label class="field-label" for="kindle-profile">Kindle 设备</label>
+                            <div class="field-control">
+                                <div class="control-with-help">
+                                    <select id="kindle-profile" name="kindle_profile">
+                                        <option value="KPW5" selected>Kindle Paperwhite 5</option>
+                                        <option value="KPW">Kindle Paperwhite</option>
+                                        <option value="KV">Kindle Voyage</option>
+                                        <option value="KO">Kindle Oasis</option>
+                                        <option value="K11">Kindle 11th Gen</option>
+                                        <option value="KS">Kindle Scribe</option>
+                                    </select>
+                                    <div class="tooltip">
+                                        <button type="button" class="info-button" aria-label="查看 Kindle 设备说明">?</button>
+                                        <div class="tooltip-content">
+                                            <p>选择目标 Kindle 型号后，MOBI 转换会按对应屏幕配置优化页面尺寸和阅读效果。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
 
                     <button type="submit" class="btn btn-primary" id="start-btn">
                         🚀 开始转换
                     </button>
                 </form>
-            </div>
-        </div>
-
-
-        <!-- 控制台输出 -->
-        <div class="panel console-panel">
-            <div class="panel-header">
-                <h2>🖥️ 控制台输出</h2>
-                <button type="button" class="btn-small" id="expand-console-btn">🔍 放大查看</button>
-            </div>
-            <div class="console-output" id="console-output">
-                <div class="console-line">等待任务输出...</div>
-            </div>
-        </div>
-
-
-        <!-- 任务历史 -->
-        <div class="panel history-panel">
-            <div class="job-history-header">
-                <h2>📜 任务历史</h2>
-                <div class="system-stats" id="system-stats">
-                    <div class="stat-item">
-                        <span class="stat-label">CPU:</span>
-                        <span class="stat-value" id="cpu-usage">--</span>
+            </section>
+            <section class="panel panel--stretch console-panel">
+                <div class="panel-header">
+                    <div>
+                        <h2>🖥️ 控制台输出</h2>
+                        <p class="panel-description">显示最近的转换日志；任务运行中会自动加快轮询频率。</p>
                     </div>
-                    <div class="stat-item">
-                        <span class="stat-label">内存:</span>
-                        <span class="stat-value" id="memory-usage">--</span>
+                    <button type="button" class="btn-small" id="expand-console-btn">🔍 放大查看</button>
+                </div>
+                <div class="console-output" id="console-output" aria-live="polite">
+                    <div class="console-line">等待任务输出...</div>
+                </div>
+            </section>
+
+            <section class="panel panel--stretch history-panel">
+                <div class="job-history-header">
+                    <div>
+                        <h2>📜 任务历史</h2>
+                        <p class="panel-description">查看后台 worker 的排队、执行、完成与失败状态。</p>
+                    </div>
+                    <div class="history-actions">
+                        <div class="system-stats" id="system-stats">
+                            <div class="stat-item">
+                                <span class="stat-label">CPU:</span>
+                                <span class="stat-value" id="cpu-usage">--</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">内存:</span>
+                                <span class="stat-value" id="memory-usage">--</span>
+                            </div>
+                        </div>
+                        <button id="clear-history-btn" type="button" class="btn-small">🗑️ 清除历史</button>
                     </div>
                 </div>
-                <button id="clear-history-btn" class="btn-small">🗑️ 清除历史</button>
-            </div>
-            <div class="job-list" id="job-list">
-                <div class="empty-state">暂无任务记录</div>
-            </div>
-        </div>
+                <div class="job-list" id="job-list">
+                    <div class="empty-state">暂无任务记录</div>
+                </div>
+            </section>
+        </section>
     </div>
 
     <div class="modal-overlay" id="console-modal" hidden>

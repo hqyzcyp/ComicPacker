@@ -501,3 +501,114 @@
   4. ZIP/book 模式不能直接照搬同样默认值，因为其内层已经会触发 `ProcessPoolExecutor(max_workers=4)`；若外层再按卷并行，必须配合“总并发预算”避免外层 * 内层双重超卖。
   5. `pdf -> mobi` 模式也不应激进并行：从运行中的 `kcc-c2e.py` 进程树可见，KCC 自身会再派生多个子进程，外层并发应更保守。
 - **结论**：若目标是“单 job 也能更充分利用多核”，则**值得推进 job 内多漫画并行**，但应优先覆盖 `cbz` / `book` 场景，并采用**可配置且按 mode 自适应的保守默认值**。
+
+## Session Addendum: Codex hook JSON error diagnosis (2026-04-16)
+- `~/.codex/hooks.json` 将 `SessionStart` 和 `UserPromptSubmit` 直接配置为执行 shell 脚本：
+  - `sh .codex/hooks/session-start.sh ... || sh "$HOME/.codex/hooks/session-start.sh" ...`
+  - `sh .codex/hooks/user-prompt-submit.sh ... || sh "$HOME/.codex/hooks/user-prompt-submit.sh" ...`
+- 当前项目下没有本地 `.codex/hooks/` 覆盖文件，因此实际回退到了全局 `~/.codex/hooks/*`。
+- `~/.codex/hooks/user-prompt-submit.sh` 会在存在 `task_plan.md` 时直接输出纯文本摘要（`echo` + `head` + `tail`），不是 JSON。
+- `~/.codex/hooks/session-start.sh` 会先运行 `session-catchup.py`，再继续调用同一个 `user-prompt-submit.sh`；因此它同样会把非 JSON 内容写到 stdout。
+- Codex 对 `SessionStart` / `UserPromptSubmit` 的 hook stdout 期望是合法 JSON；当前脚本输出纯文本，所以报：`invalid session start JSON output` / `invalid user prompt submit JSON output`。
+- `PreToolUse` / `PostToolUse` / `Stop` 没报同类错误，是因为它们走的是 Python adapter，最终输出 JSON。
+
+## 本地 hook 修复实现（2026-04-16）
+- 已在当前仓库创建 `.codex/hooks/`，利用 `~/.codex/hooks.json` 的“本地优先、全局回退”机制覆盖出错 hook。
+- 新增 `.codex/hooks/planning-context.sh`：继续生成原有纯文本计划摘要，避免逻辑重复。
+- 新增 `.codex/hooks/emit_context_hook.py`：把纯文本摘要包装为合法 JSON：
+  - `hookSpecificOutput.hookEventName`
+  - `hookSpecificOutput.additionalContext`
+- 新增 `.codex/hooks/user-prompt-submit.sh`：输出 `UserPromptSubmit` 所需 JSON。
+- 新增 `.codex/hooks/session-start.sh`：保留 `session-catchup.py` 行为，但将 catchup 输出与计划摘要统一 JSON 化后再返回。
+- 验证方式：直接按 `~/.codex/hooks.json` 中的命令在当前仓库执行，两个 hook 输出都能被 `json.loads` 成功解析，且 `hookEventName` 分别为 `UserPromptSubmit` / `SessionStart`。
+- 该修复仅影响当前仓库；其他仓库若没有本地 `.codex/hooks/` 覆盖，仍会继续命中全局纯文本 hook 并报同样错误。
+
+
+## UI Refactor Audit Kickoff (2026-04-16)
+- 本轮任务范围集中在 `templates/index.html`、`static/app.js`、`static/style.css`，必要时只对 `web_server.py` 做最小接口契约修补。
+- 当前前端是单页原生 HTML/CSS/JS，没有构建系统；因此“规范格式和接口”主要体现为：减少内联样式、统一状态更新入口、收紧 API 读取与错误处理、避免 DOM/状态分叉。
+- `omx explore` 在当前环境不可用，报错为缺少 `cargo` / explore harness，因此代码审查改为直接读取源码。
+- 首轮 UI 文件快速观察：
+  - `templates/index.html` 仍存在注释掉的旧 header 结构，且存在部分布局语义可收敛。
+  - `static/app.js` 负责大量状态、DOM、接口与轮询逻辑，文件职责偏重，适合先做逻辑分组和重复路径收敛。
+  - `static/style.css` 已较长，既有通用面板样式，也有具体组件样式，后续需检查重复规则、响应式缺口和与 HTML 结构的耦合点。
+
+## UI Audit Findings: First Pass (2026-04-16)
+- `templates/index.html`
+  - 页面主结构当前为：文件浏览器 / 转换配置双栏 + 控制台面板 + 任务历史面板 + 日志弹窗。
+  - 存在被整段注释掉的旧 `header`，属于死结构噪音，可在重构中删除或恢复为真实语义头部。
+  - `batch-size-group` 仍以内联 `style="display: none;"` 控制初始状态，布局状态与 JS 耦合较紧，适合改为 class/hidden 驱动。
+- `static/app.js`
+  - 文件承担初始化、DOM 查询、目录浏览、模式检测、任务创建、轮询、弹窗、通知、历史渲染等多重职责，后续应优先做逻辑分组与重复错误处理收敛。
+  - 已有较好的 API 入口统一点 `readApiPayload()`，但其余请求流程仍多处重复“fetch + parse + response.ok 判断”模板。
+  - 文件浏览器当前采用“单击选中、再次点击同一项进入目录”的交互，逻辑上可用，但实现依赖 `.selected` DOM class，而不是显式选中状态模型。
+- `web_server.py`
+  - UI 直接依赖的主要接口为 `/api/config`、`/api/config/default-path`、`/api/browse`、`/api/download`、`/api/detect-mode`、`/api/system-stats`、`/api/console-output`、`/api/jobs*`。
+  - `analyze_comic_folder()` 与 `create_job()` 构成前端命名预览与任务参数的关键契约，需要在前端重构时保持字段一致性。
+- 测试现状
+  - 当前已有 `tests/test_web_workers.py`，但覆盖点集中在 worker 并发与日志隔离，还没有覆盖前端契约相关的 Flask API 行为与隐藏状态问题。
+
+## UI Audit Findings: Baseline Diagnostics (2026-04-16)
+- 项目当前没有 `tsconfig`，因此 LSP/tsc 级别的前端静态诊断不可用；`static/app.js` 只能依赖 `node --check` 与人工审查。
+- 直接用系统 Python 跑 `python3 -m unittest discover -s tests -p 'test_*.py'` 失败，不是代码回归，而是环境缺少依赖：
+  - `reportlab`
+  - `flask`
+- 这说明当前仓库测试需要切到项目既有环境（历史记录显示为 conda `comic` 环境）后再做有效验证。
+- 纯语法层面：`python3 -m py_compile web_server.py main.py` 与 `node --check static/app.js` 在系统环境下可通过，问题主要在运行依赖而非语法。
+- 切换到 `conda run -n comic` 后，现有 11 个测试全部通过；说明当前代码基线可工作，后续可以在该环境中做回归验证。
+- 这也再次确认：系统 Python 报错是环境问题，不是当前代码已损坏。
+
+## UI Contract Regressions Captured by New Tests (2026-04-16)
+- 新增 `tests/test_web_ui_api.py` 后，确认了两个此前未被覆盖的隐藏问题：
+  1. `/api/jobs` 在 `mode` 非法时仍返回 200 并创建任务，错误会延迟到 worker 线程中才暴露；这属于接口边界未校验。
+  2. `/api/jobs/clear` 的 `cleared_count` 计算在 `jobs.clear(); jobs.update(...)` 之后执行，结果永远为 0；这会让 UI 的清理历史反馈与实际不一致。
+- 同时 `test_detect_mode_returns_ui_analysis_contract` 已建立当前 UI 命名分析契约基线，便于后续前端重构时保持字段一致。
+
+## UI Refactor Implementation Notes (2026-04-16)
+- `templates/index.html`
+  - 用真实的 `app-header` 替换了注释掉的旧 header，并把页面组织为 `main-grid + secondary-grid` 两段布局。
+  - 将配置表单拆为多个 `form-section`，同时移除了 `batch-size-group` 的内联 `display:none`，改为 `hidden` 驱动。
+- `static/style.css`
+  - 新增了页面头部、次级网格、表单分区、路径按钮组和历史区动作栏的布局样式。
+  - 合并了重复的 `.btn-small` 定义，并移除了多段未再使用的旧 progress 区块样式，减少样式噪音。
+  - 新增 `stat-value--good/warn/bad`，把系统指标颜色从 JS 内联样式改为 class 驱动。
+- `static/app.js`
+  - 新增统一的 `requestJson()`，收敛前端 `fetch + parse + error` 模板代码。
+  - 新增 `renderPlaceholder()` / `clearElement()` / `setElementHidden()` / `setStatValue()` 等小型 UI helper，减少重复 DOM 操作。
+  - `renderFileList()` 和 `renderJobList()` 改为 DOM API 构建节点，不再把文件名、路径、错误信息直接拼进 `innerHTML`；这修复了 UI 中潜在的 HTML 注入/XSS 风险，并移除了 `onclick` 字符串处理。
+  - `startConversion()` 现在在请求进行中会禁用开始按钮，避免重复点击提交同一任务。
+- `web_server.py`
+  - `/api/jobs` 新增模式白名单校验，非法 mode 现在会在 API 层直接返回 400，而不是进入 worker 后再失败。
+  - `/api/jobs/clear` 修复了历史清理数量始终显示为 0 的计数错误。
+- `tests/test_web_ui_api.py`
+  - 新增了 `detect-mode` 契约、非法 mode 拒绝、clear history 计数三个回归测试，用于保护 UI 依赖的关键后端契约。
+
+## Web Layout / PDF Retention Change Audit (2026-04-16)
+- 当前页面结构仍使用 `main-grid + secondary-grid` 两段独立网格；这会导致上下两行列宽不一致，不满足“上下对齐宽度，左右对齐高度”的 2x2 面板要求。
+- 当前配置表单中 `mode` 下拉选项文案较短，模式说明通过底部 `help-text` 展示；这与用户要求的“说明直接写进选项 + 右侧 hover 说明按钮”不一致。
+- 当前 UI 只有 `convert_to_mobi` 复选框，没有 `keep_pdf`；前端请求体也未发送对应参数，后端转换完成后不会清理 `<输出根>/<漫画名>/pdf`。
+- `main.py` 的三种会生成 PDF 的流程（batch/book/cbz）都统一通过 `prepare_output_layout()` 创建 `pdf/` 与 `mobi/` 目录，因此“转换完成后删除 PDF 文件夹”最适合抽成公共清理 helper，而不是分别复制粘贴逻辑。
+- 当前 `PDF -> MOBI` 模式也会创建输出布局中的 `pdf/` 目录，但该目录并不承载新生成内容；如果允许 `keep_pdf=false`，删除空 `pdf/` 目录即可满足“只留下 MOBI 文件夹”的结果。
+- `templates/index.html` 中“命名来源”一行当前由 `static/app.js` 中的 `namingSourceDisplay` 驱动；如果删除该行，需要同步移除 DOM 查询与状态更新，避免空节点访问。
+- 现有测试里 `tests/test_web_ui_api.py` 适合补 API 参数默认值/约束测试；输出目录删除逻辑更适合在 `tests/test_pdf_workflows.py` 或新增轻量单测中直接验证 `main.py` 行为。
+
+## Web Layout / PDF Retention Implementation Findings (2026-04-16)
+- 统一四面板布局最稳妥的方式是把原本分开的 `main-grid` 与 `secondary-grid` 合并成单一 `workspace-grid`。CSS Grid 会天然保证同一行左右两块面板等高、同一列上下两块面板等宽，满足“上下对齐宽度，左右对齐高度”。
+- “label 和 select 同行”可以通过 `form-row` 的两列栅格实现，不需要引入额外 JS；移动端再退化成单列即可保持自适应。
+- `keep_pdf` 的前端状态规则最终定为：
+  - 未启用 MOBI 转换时：强制勾选并禁用；
+  - 启用 MOBI 转换时：允许取消勾选；
+  - `pdf` 模式：`convert_to_mobi` 强制为 true，但 `keep_pdf` 仍可控制是否保留输出布局中的 `pdf/` 子目录。
+- `main.py` 中新增 `cleanup_pdf_output_dir()` 后，四种转换路径都能复用同一清理逻辑；这样避免了分别在 batch/book/cbz/pdf 中写四遍 `shutil.rmtree`。
+- API 层新增 `coerce_bool()` 后，`keep_pdf` / `convert_to_mobi` 即使以后从非 JSON 场景传入字符串值，也能保持一致布尔语义。
+- 新增测试覆盖点：
+  - `tests/test_web_ui_api.py`：`keep_pdf` 在 API 层的默认强制/允许关闭逻辑；
+  - `tests/test_output_retention.py`：MOBI 生成后是否删除 `pdf/` 子目录。
+
+## Visual Compression Follow-up Findings (2026-04-16)
+- 用户提供的页面截图确认：转换配置区虽然功能到位，但仍因多行说明文本和较大的 section padding 显得偏高，尤其是“转换模式”单行子模块。
+- 这轮优化采取两条主线：
+  1. 把转换配置区所有说明迁移到统一的 `?` tooltip 按钮；
+  2. 继续压缩 `form-section`、`form-row`、输入框、输出预览和 checkbox chip 的垂直尺寸。
+- 动态说明没有删除，而是改为挂载到 tooltip 内容节点：`comic-name-help`、`output-preview-help`、`format-options-help` 仍由 `static/app.js` 更新，只是不再占用额外行高。
+- 本轮未改动后端契约，仅做模板/样式层面的视觉收紧，因此回归风险主要集中在 DOM id 是否仍被 JS 正确引用；测试与语法检查已覆盖基本回归面。

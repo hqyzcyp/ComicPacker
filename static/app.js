@@ -5,7 +5,16 @@ const ACTIVE_JOB_STATUSES = new Set(['pending', 'running']);
 const FAST_CONSOLE_POLL_MS = 1000;
 const IDLE_CONSOLE_POLL_MS = 4000;
 const HIDDEN_CONSOLE_POLL_MS = 15000;
+const JOB_LIST_POLL_MS = 5000;
+const SYSTEM_STATS_POLL_MS = 1000;
 const FALLBACK_BROWSE_ROOT = '/mnt';
+const STAT_TONE_CLASSES = ['stat-value--good', 'stat-value--warn', 'stat-value--bad'];
+const MODE_LABELS = {
+    book: '按书打包',
+    cbz: '按CBZ打包',
+    batch: '按批次打包',
+    pdf: 'PDF转换MOBI'
+};
 
 // State management
 let currentPath = FALLBACK_BROWSE_ROOT;
@@ -19,13 +28,13 @@ let hasActiveJobs = false;
 let lastFocusedElement = null;
 let defaultComicFolder = FALLBACK_BROWSE_ROOT;
 let defaultOutputFolder = `${FALLBACK_BROWSE_ROOT}/comic_output`;
+let isSubmittingJob = false;
 
 // DOM elements
 const fileList = document.getElementById('file-list');
 const currentPathInput = document.getElementById('current-path');
 const selectedFolderDisplay = document.getElementById('selected-folder-display');
 const firstFileDisplay = document.getElementById('first-file-display');
-const namingSourceDisplay = document.getElementById('naming-source-display');
 const conversionForm = document.getElementById('conversion-form');
 const jobList = document.getElementById('job-list');
 const startBtn = document.getElementById('start-btn');
@@ -51,6 +60,9 @@ const batchSizeValue = document.getElementById('batch-size-value');
 const modeSelect = document.getElementById('mode');
 const convertToMobiGroup = document.getElementById('convert-to-mobi-group');
 const convertToMobiCheckbox = document.getElementById('convert-to-mobi');
+const keepPdfGroup = document.getElementById('keep-pdf-group');
+const keepPdfCheckbox = document.getElementById('keep-pdf');
+const formatOptionsHelp = document.getElementById('format-options-help');
 const kindleProfileGroup = document.getElementById('kindle-profile-group');
 
 // Initialize
@@ -69,12 +81,7 @@ async function initializePage() {
 
 async function loadConfig() {
     try {
-        const response = await fetch('/api/config');
-        const data = await readApiPayload(response);
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to load config');
-        }
-
+        const data = await requestJson('/api/config');
         defaultComicFolder = data.comic_folder || FALLBACK_BROWSE_ROOT;
         defaultOutputFolder = data.output_folder || `${FALLBACK_BROWSE_ROOT}/comic_output`;
         setOutputValue(defaultOutputFolder, true);
@@ -97,18 +104,10 @@ async function setCurrentAsDefault() {
     }
 
     try {
-        const response = await fetch('/api/config/default-path', {
+        const data = await requestJson('/api/config/default-path', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ path: currentPath })
+            body: { path: currentPath }
         });
-
-        const data = await readApiPayload(response);
-        if (!response.ok) {
-            throw new Error(data.error || '保存默认路径失败');
-        }
 
         defaultComicFolder = data.comic_folder || currentPath;
         defaultOutputFolder = data.output_folder || defaultOutputFolder;
@@ -161,6 +160,33 @@ async function readApiPayload(response) {
     }
 }
 
+async function requestJson(url, options = {}) {
+    const { body, headers = {}, ...rest } = options;
+    const requestOptions = {
+        ...rest,
+        headers: { ...headers }
+    };
+
+    if (body !== undefined) {
+        requestOptions.body = typeof body === 'string' || body instanceof FormData
+            ? body
+            : JSON.stringify(body);
+
+        if (!(body instanceof FormData) && !requestOptions.headers['Content-Type']) {
+            requestOptions.headers['Content-Type'] = 'application/json';
+        }
+    }
+
+    const response = await fetch(url, requestOptions);
+    const data = await readApiPayload(response);
+
+    if (!response.ok) {
+        throw new Error(data.error || `请求失败（HTTP ${response.status}）`);
+    }
+
+    return data;
+}
+
 function escapeHtml(value) {
     return String(value || '')
         .replace(/&/g, '&amp;')
@@ -182,30 +208,54 @@ function getCurrentComicName() {
     return (comicNameInput.value || '').trim();
 }
 
+function clearElement(element) {
+    if (!element) {
+        return;
+    }
+
+    while (element.firstChild) {
+        element.removeChild(element.firstChild);
+    }
+}
+
+function renderPlaceholder(element, className, message) {
+    clearElement(element);
+    const placeholder = document.createElement('div');
+    placeholder.className = className;
+    placeholder.textContent = message;
+    element.appendChild(placeholder);
+}
+
+function setElementHidden(element, hidden) {
+    if (element) {
+        element.hidden = Boolean(hidden);
+    }
+}
+
+function getStatTone(value) {
+    if (value > 80) {
+        return 'bad';
+    }
+    if (value > 50) {
+        return 'warn';
+    }
+    return 'good';
+}
+
+function setStatValue(element, text, numericValue) {
+    if (!element) {
+        return;
+    }
+
+    element.textContent = text;
+    element.classList.remove(...STAT_TONE_CLASSES);
+    element.classList.add(`stat-value--${getStatTone(numericValue)}`);
+}
+
 function setOutputValue(value, autoManaged = true) {
     outputInput.value = value;
     outputInput.dataset.autoManaged = autoManaged ? 'true' : 'false';
     updateOutputPreview();
-}
-
-function formatNamingSource(data) {
-    if (!data || !data.first_file_name) {
-        return '未找到漫画文件，请手动填写漫画名';
-    }
-
-    const sourceLabel = {
-        filename: '已从首个文件名自动提取',
-        folder: '文件名仅包含 Vol，已从文件夹名推断',
-        unknown: '暂时无法可靠推断'
-    }[data.naming_source] || '暂时无法可靠推断';
-
-    const confidenceLabel = {
-        high: '高',
-        medium: '中',
-        low: '低'
-    }[data.naming_confidence] || '低';
-
-    return `${sourceLabel}（置信度${confidenceLabel}）`;
 }
 
 function updateOutputFolderSuggestion(force = false) {
@@ -227,50 +277,95 @@ function updateOutputFolderSuggestion(force = false) {
     setOutputValue('./output', true);
 }
 
-function updateOutputPreview() {
+function formatModeLabel(mode) {
+    return MODE_LABELS[mode] || mode;
+}
+
+function isPdfModeSelected() {
+    return modeSelect.value === 'pdf';
+}
+
+function isMobiConversionEnabled() {
+    return isPdfModeSelected() || convertToMobiCheckbox.checked;
+}
+
+function shouldKeepPdfOutput() {
+    return keepPdfCheckbox.checked;
+}
+
+function updateFormatOptionState() {
+    const pdfMode = isPdfModeSelected();
+    const mobiEnabled = isMobiConversionEnabled();
+
+    convertToMobiCheckbox.checked = mobiEnabled;
+    convertToMobiCheckbox.disabled = pdfMode;
+
+    if (!mobiEnabled) {
+        keepPdfCheckbox.checked = true;
+    }
+    keepPdfCheckbox.disabled = !mobiEnabled;
+
+    convertToMobiGroup.classList.toggle('checkbox-chip--disabled', convertToMobiCheckbox.disabled);
+    keepPdfGroup.classList.toggle('checkbox-chip--disabled', keepPdfCheckbox.disabled);
+
+    if (!mobiEnabled) {
+        formatOptionsHelp.textContent = '当前只输出 PDF；若需选择是否保留 PDF，请先勾选 MOBI 转换。';
+    } else if (shouldKeepPdfOutput()) {
+        formatOptionsHelp.textContent = '转换完成后会同时保留 pdf 与 mobi 两个子目录。';
+    } else {
+        formatOptionsHelp.textContent = '转换完成后会自动删除 pdf 子目录，只保留 mobi 子目录。';
+    }
+}
+
+function buildPreviewBaseName() {
     const previewVolume = selectedFolderAnalysis?.sample_volume || '01';
     const comicName = getCurrentComicName();
-    const batchPreviewBase = comicName || '漫画名';
-    let previewText;
 
     if (modeSelect.value === 'batch') {
-        previewText = `${batchPreviewBase}_CH-001_to_CH-010.pdf`;
-    } else if (modeSelect.value === 'pdf') {
-        previewText = comicName
-            ? `${comicName} Vol.${previewVolume}.mobi`
-            : `${selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`}.mobi`;
-    } else {
-        previewText = comicName
-            ? `${comicName} Vol.${previewVolume}.pdf`
-            : `${selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`}.pdf`;
+        return `${comicName || '漫画名'}_CH-001_to_CH-010`;
     }
+
+    if (comicName) {
+        return `${comicName} Vol.${previewVolume}`;
+    }
+
+    return selectedFolderAnalysis?.output_preview || `漫画名 Vol.${previewVolume}`;
+}
+
+function updateOutputPreview() {
+    const previewBaseName = buildPreviewBaseName();
+    const pdfMode = isPdfModeSelected();
+    const mobiEnabled = isMobiConversionEnabled();
+    const keepPdf = shouldKeepPdfOutput();
+    const preferredExtension = (pdfMode || (mobiEnabled && !keepPdf)) ? 'mobi' : 'pdf';
+    const previewText = `${previewBaseName}.${preferredExtension}`;
 
     outputNamePreview.textContent = previewText;
 
     const rootDir = (outputInput.value || './output').trim() || './output';
-    const folderName = sanitizePathComponent(comicName || selectedFolderAnalysis?.comic_name || '漫画名');
+    const folderName = sanitizePathComponent(getCurrentComicName() || selectedFolderAnalysis?.comic_name || '漫画名');
+    const pdfPath = `${rootDir}/${folderName}/pdf/${previewBaseName}.pdf`;
+    const mobiPath = `${rootDir}/${folderName}/mobi/${previewBaseName}.mobi`;
 
-    if (modeSelect.value === 'pdf') {
-        outputPreviewHelp.textContent = `输出结构：${rootDir}/${folderName}/mobi/${previewText}`;
+    if (pdfMode) {
+        outputPreviewHelp.textContent = keepPdf
+            ? `输出结构：${mobiPath} ｜ 同时保留 ${rootDir}/${folderName}/pdf/`
+            : `输出结构：${mobiPath} ｜ 转换完成后仅保留 mobi 子目录`;
+    } else if (!mobiEnabled) {
+        outputPreviewHelp.textContent = `输出结构：${pdfPath}`;
+    } else if (keepPdf) {
+        outputPreviewHelp.textContent = `输出结构：${pdfPath} ｜ 另生成 ${rootDir}/${folderName}/mobi/`;
     } else {
-        outputPreviewHelp.textContent = `输出结构：${rootDir}/${folderName}/pdf/${previewText}${convertToMobiCheckbox.checked ? ` ｜ 另生成 ${rootDir}/${folderName}/mobi/` : ''}`;
+        outputPreviewHelp.textContent = `输出结构：${mobiPath} ｜ 转换完成后自动删除 ${rootDir}/${folderName}/pdf/`;
     }
 }
 
 function updateModeSpecificControls() {
     const isBatchMode = modeSelect.value === 'batch';
-    const isPdfMode = modeSelect.value === 'pdf';
 
-    batchSizeGroup.style.display = isBatchMode ? 'block' : 'none';
-    convertToMobiGroup.style.display = isPdfMode ? 'none' : 'block';
-
-    if (isPdfMode) {
-        convertToMobiCheckbox.checked = true;
-    }
-
-    kindleProfileGroup.style.display = (isPdfMode || convertToMobiCheckbox.checked)
-        ? 'block'
-        : 'none';
+    setElementHidden(batchSizeGroup, !isBatchMode);
+    updateFormatOptionState();
+    setElementHidden(kindleProfileGroup, !isMobiConversionEnabled());
 
     updateOutputPreview();
 }
@@ -278,7 +373,6 @@ function updateModeSpecificControls() {
 function applyFolderAnalysis(data) {
     selectedFolderAnalysis = data;
     firstFileDisplay.textContent = data.first_file_name || '未找到漫画文件';
-    namingSourceDisplay.textContent = formatNamingSource(data);
 
     comicNameInput.value = data.comic_name || '';
 
@@ -414,10 +508,15 @@ function setupEventListeners() {
 
     // MOBI conversion checkbox
     convertToMobiCheckbox.addEventListener('change', (e) => {
-        if (modeSelect.value === 'pdf') {
+        if (isPdfModeSelected()) {
             e.target.checked = true;
         }
         updateModeSpecificControls();
+    });
+
+    keepPdfCheckbox.addEventListener('change', () => {
+        updateFormatOptionState();
+        updateOutputPreview();
     });
 
     comicNameInput.addEventListener('input', () => {
@@ -457,21 +556,13 @@ function setupEventListeners() {
 
 // Load directory contents
 async function loadDirectory(path) {
-    fileList.innerHTML = '<div class="loading">加载中...</div>';
+    renderPlaceholder(fileList, 'loading', '加载中...');
 
     try {
-        const response = await fetch('/api/browse', {
+        const data = await requestJson('/api/browse', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ path })
+            body: { path }
         });
-        const data = await readApiPayload(response);
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to load directory');
-        }
 
         currentPath = data.path;
         currentPathInput.value = data.path;
@@ -480,7 +571,7 @@ async function loadDirectory(path) {
         renderFileList(data.items);
     } catch (error) {
         console.error('Error loading directory:', error);
-        fileList.innerHTML = `<div class="loading">加载失败：${escapeHtml(error.message)}</div>`;
+        renderPlaceholder(fileList, 'loading', `加载失败：${error.message}`);
         showNotification(`⚠ 加载目录失败: ${error.message}`, 'warning');
     }
 }
@@ -498,29 +589,38 @@ function triggerDownload(path) {
 
 // Render file list
 function renderFileList(items) {
-    if (items.length === 0) {
-        fileList.innerHTML = '<div class="empty-state">目录为空</div>';
+    if (!Array.isArray(items) || items.length === 0) {
+        renderPlaceholder(fileList, 'empty-state', '目录为空');
         return;
     }
 
-    fileList.innerHTML = '';
+    clearElement(fileList);
+    const fragment = document.createDocumentFragment();
 
     items.forEach(item => {
         const fileItem = document.createElement('div');
         fileItem.className = 'file-item';
 
-        const icon = item.is_dir ? '📁' : '📄';
-        const fileCount = item.is_dir && item.file_count > 0
-            ? `<div class="file-count">${item.file_count} 个文件</div>`
-            : '';
+        const icon = document.createElement('div');
+        icon.className = 'file-icon';
+        icon.textContent = item.is_dir ? '📁' : '📄';
 
-        fileItem.innerHTML = `
-            <div class="file-icon">${icon}</div>
-            <div class="file-info">
-                <div class="file-name">${item.name}</div>
-                ${fileCount}
-            </div>
-        `;
+        const fileInfo = document.createElement('div');
+        fileInfo.className = 'file-info';
+
+        const fileName = document.createElement('div');
+        fileName.className = 'file-name';
+        fileName.textContent = item.name;
+        fileInfo.appendChild(fileName);
+
+        if (item.is_dir && item.file_count > 0) {
+            const fileCount = document.createElement('div');
+            fileCount.className = 'file-count';
+            fileCount.textContent = `${item.file_count} 个文件`;
+            fileInfo.appendChild(fileCount);
+        }
+
+        fileItem.append(icon, fileInfo);
 
         if (item.is_downloadable) {
             const fileActions = document.createElement('div');
@@ -556,8 +656,10 @@ function renderFileList(items) {
             }
         });
 
-        fileList.appendChild(fileItem);
+        fragment.appendChild(fileItem);
     });
+
+    fileList.appendChild(fragment);
 }
 
 // Select folder
@@ -566,7 +668,6 @@ async function selectFolder(path) {
     selectedFolderDisplay.textContent = path;
     selectedFolderAnalysis = null;
     firstFileDisplay.textContent = '读取中...';
-    namingSourceDisplay.textContent = '正在分析文件夹内容...';
     outputInput.dataset.autoManaged = 'true';
     updateOutputPreview();
 
@@ -577,18 +678,10 @@ async function selectFolder(path) {
 // Detect folder contents and switch mode automatically
 async function detectAndSwitchMode(folderPath) {
     try {
-        const response = await fetch('/api/detect-mode', {
+        const data = await requestJson('/api/detect-mode', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ path: folderPath })
+            body: { path: folderPath }
         });
-        const data = await readApiPayload(response);
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to detect mode');
-        }
 
         const recommendedMode = data.recommended_mode;
         applyFolderAnalysis(data);
@@ -617,14 +710,17 @@ async function detectAndSwitchMode(folderPath) {
     } catch (error) {
         console.error('Error detecting mode:', error);
         firstFileDisplay.textContent = '读取失败';
-        namingSourceDisplay.textContent = '自动分析失败，请手动填写漫画名';
     }
 }
 
 // Start conversion
 async function startConversion() {
     if (!selectedFolder) {
-        alert('请先选择一个文件夹');
+        showNotification('⚠ 请先选择一个文件夹', 'warning');
+        return;
+    }
+
+    if (isSubmittingJob) {
         return;
     }
 
@@ -639,7 +735,8 @@ async function startConversion() {
         prefix: comicName,
         comic_name: comicName,
         output: outputFolder,
-        convert_to_mobi: modeSelect.value === 'pdf' ? true : convertToMobiCheckbox.checked,
+        convert_to_mobi: isMobiConversionEnabled(),
+        keep_pdf: isMobiConversionEnabled() ? shouldKeepPdfOutput() : true,
         kindle_profile: formData.get('kindle_profile') || 'KPW5'
     };
 
@@ -649,18 +746,13 @@ async function startConversion() {
     }
 
     try {
-        const response = await fetch('/api/jobs', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(params)
-        });
-        const data = await readApiPayload(response);
+        isSubmittingJob = true;
+        startBtn.disabled = true;
 
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to start conversion');
-        }
+        const data = await requestJson('/api/jobs', {
+            method: 'POST',
+            body: params
+        });
 
         // Show success notification
         showNotification(`✓ 任务已提交: ${data.job_id.substring(0, 8)}`, 'success');
@@ -672,7 +764,10 @@ async function startConversion() {
 
     } catch (error) {
         console.error('Error starting conversion:', error);
-        alert('启动转换失败: ' + error.message);
+        showNotification(`⚠ 启动转换失败: ${error.message}`, 'warning');
+    } finally {
+        isSubmittingJob = false;
+        startBtn.disabled = false;
     }
 }
 
@@ -684,14 +779,9 @@ async function cancelJob(jobId) {
     }
 
     try {
-        const response = await fetch(`/api/jobs/${jobId}/cancel`, {
+        await requestJson(`/api/jobs/${jobId}/cancel`, {
             method: 'POST'
         });
-        const data = await readApiPayload(response);
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to cancel job');
-        }
 
         showNotification('✓ 任务取消请求已发送', 'success');
 
@@ -700,21 +790,16 @@ async function cancelJob(jobId) {
 
     } catch (error) {
         console.error('Error cancelling job:', error);
-        alert('取消任务失败: ' + error.message);
+        showNotification(`⚠ 取消任务失败: ${error.message}`, 'warning');
     }
 }
 
 // Delete job
 async function deleteJob(jobId) {
     try {
-        const response = await fetch(`/api/jobs/${jobId}`, {
+        await requestJson(`/api/jobs/${jobId}`, {
             method: 'DELETE'
         });
-        const data = await readApiPayload(response);
-
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to delete job');
-        }
 
         showNotification('✓ 任务已删除', 'success');
 
@@ -723,7 +808,7 @@ async function deleteJob(jobId) {
 
     } catch (error) {
         console.error('Error deleting job:', error);
-        alert('删除任务失败: ' + error.message);
+        showNotification(`⚠ 删除任务失败: ${error.message}`, 'warning');
     }
 }
 
@@ -732,12 +817,7 @@ async function deleteJob(jobId) {
 // Load job history
 async function loadJobs() {
     try {
-        const response = await fetch('/api/jobs');
-        const data = await readApiPayload(response);
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to load jobs');
-        }
-
+        const data = await requestJson('/api/jobs');
         syncActiveJobState(data.jobs);
         renderJobList(data.jobs);
     } catch (error) {
@@ -752,129 +832,177 @@ async function clearJobHistory() {
     }
 
     try {
-        const response = await fetch('/api/jobs/clear', {
+        const data = await requestJson('/api/jobs/clear', {
             method: 'POST'
         });
-        const data = await readApiPayload(response);
 
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to clear job history');
-        }
+        showNotification(`✓ ${data.message}`, 'success');
 
         // Reload job list
         loadJobs();
     } catch (error) {
         console.error('Error clearing job history:', error);
-        alert('清除历史记录失败: ' + error.message);
+        showNotification(`⚠ 清除历史记录失败: ${error.message}`, 'warning');
     }
 }
 
 // Render job list
 function renderJobList(jobs) {
-    if (jobs.length === 0) {
-        jobList.innerHTML = '<div class="empty-state">暂无任务记录</div>';
+    if (!Array.isArray(jobs) || jobs.length === 0) {
+        renderPlaceholder(jobList, 'empty-state', '暂无任务记录');
         return;
     }
 
-    // Sort by created time (newest first)
-    jobs.sort((a, b) => new Date(b.created_time) - new Date(a.created_time));
+    const sortedJobs = [...jobs].sort((a, b) => new Date(b.created_time) - new Date(a.created_time));
+    const fragment = document.createDocumentFragment();
 
-    jobList.innerHTML = jobs.map(job => {
+    sortedJobs.forEach(job => {
         const statusClass = job.status;
         const statusText = {
-            'pending': '⏳ 等待中',
-            'running': '▶️ 运行中',
-            'completed': '✅ 已完成',
-            'failed': '❌ 失败',
-            'cancelled': '⚠️ 已取消'
+            pending: '⏳ 等待中',
+            running: '▶️ 运行中',
+            completed: '✅ 已完成',
+            failed: '❌ 失败',
+            cancelled: '⚠️ 已取消'
         }[job.status] || job.status;
 
-        const createdTime = new Date(job.created_time).toLocaleString('zh-CN');
-        const mode = job.parameters.mode;
-        const folder = job.parameters.folder;
-
-        // 获取进度信息
         const progress = job.progress || {};
-        const progressPercentage = progress.percentage || 0;
+        const progressPercentage = Number(progress.percentage || 0);
         const progressMessage = progress.message || '';
-        const progressInfo = progress.current && progress.total
+        const progressInfo = Number.isFinite(progress.current) && Number.isFinite(progress.total) && progress.total > 0
             ? `${progress.current}/${progress.total}`
             : '';
         const terminalMessage = progressMessage || job.error || '';
 
-        // 确定显示哪个按钮
-        const isActive = job.status === 'pending' || job.status === 'running';
-        const actionButton = isActive
-            ? `<button class="job-action-btn cancel-btn" onclick="cancelJob('${job.id}')">🛑 取消</button>`
-            : `<button class="job-action-btn delete-btn" onclick="deleteJob('${job.id}')">🗑️ 删除</button>`;
+        const jobItem = document.createElement('article');
+        jobItem.className = `job-item ${statusClass}`;
 
-        return `
-            <div class="job-item ${statusClass}">
-                <div class="job-header">
-                    <div class="job-id">${job.id.substring(0, 8)}</div>
-                    <div class="job-status ${statusClass}">${statusText}</div>
-                    ${actionButton}
-                </div>
-                <div class="job-details">
-                    <div><strong>模式:</strong> ${mode}</div>
-                    <div><strong>文件夹:</strong> ${folder}</div>
-                    <div><strong>创建时间:</strong> ${createdTime}</div>
-                    ${job.status === 'running' ? `
-                        <div class="job-progress-info">
-                            <div class="job-progress-bar-container">
-                                <div class="job-progress-bar" style="width: ${progressPercentage}%"></div>
-                            </div>
-                            <div class="job-progress-text">
-                                <span>${progressPercentage}%</span>
-                                ${progressInfo ? `<span class="job-progress-count">${progressInfo}</span>` : ''}
-                            </div>
-                            ${progressMessage ? `<div class="job-progress-message">${progressMessage}</div>` : ''}
-                        </div>
-                    ` : ''}
-                    ${job.status !== 'running' && terminalMessage ? `<div class="job-progress-message">${terminalMessage}</div>` : ''}
-                    ${job.status === 'completed' && progressInfo ? `<div><strong>处理数量:</strong> ${progressInfo}</div>` : ''}
-                    ${job.error ? `<div style="color: var(--accent-error);"><strong>错误:</strong> ${job.error}</div>` : ''}
-                </div>
-            </div>
-        `;
-    }).join('');
+        const header = document.createElement('div');
+        header.className = 'job-header';
+
+        const jobId = document.createElement('div');
+        jobId.className = 'job-id';
+        jobId.textContent = String(job.id || '').substring(0, 8);
+
+        const status = document.createElement('div');
+        status.className = `job-status ${statusClass}`;
+        status.textContent = statusText;
+
+        const actionButton = document.createElement('button');
+        actionButton.type = 'button';
+        actionButton.className = `job-action-btn ${ACTIVE_JOB_STATUSES.has(job.status) ? 'cancel-btn' : 'delete-btn'}`;
+        actionButton.textContent = ACTIVE_JOB_STATUSES.has(job.status) ? '🛑 取消' : '🗑️ 删除';
+        actionButton.addEventListener('click', () => {
+            if (ACTIVE_JOB_STATUSES.has(job.status)) {
+                cancelJob(job.id);
+            } else {
+                deleteJob(job.id);
+            }
+        });
+
+        header.append(jobId, status, actionButton);
+
+        const details = document.createElement('div');
+        details.className = 'job-details';
+
+        [['模式', formatModeLabel(job.parameters?.mode || 'book')], ['文件夹', job.parameters?.folder || ''], ['创建时间', new Date(job.created_time).toLocaleString('zh-CN')]]
+            .forEach(([label, value]) => {
+                const row = document.createElement('div');
+                const strong = document.createElement('strong');
+                strong.textContent = `${label}:`;
+                row.append(strong, document.createTextNode(` ${value}`));
+                details.appendChild(row);
+            });
+
+        if (job.status === 'running') {
+            const progressInfoBlock = document.createElement('div');
+            progressInfoBlock.className = 'job-progress-info';
+
+            const progressBarContainer = document.createElement('div');
+            progressBarContainer.className = 'job-progress-bar-container';
+
+            const progressBar = document.createElement('div');
+            progressBar.className = 'job-progress-bar';
+            progressBar.style.width = `${progressPercentage}%`;
+            progressBarContainer.appendChild(progressBar);
+
+            const progressText = document.createElement('div');
+            progressText.className = 'job-progress-text';
+
+            const progressPercent = document.createElement('span');
+            progressPercent.textContent = `${progressPercentage}%`;
+            progressText.appendChild(progressPercent);
+
+            if (progressInfo) {
+                const progressCount = document.createElement('span');
+                progressCount.className = 'job-progress-count';
+                progressCount.textContent = progressInfo;
+                progressText.appendChild(progressCount);
+            }
+
+            progressInfoBlock.append(progressBarContainer, progressText);
+
+            if (progressMessage) {
+                const message = document.createElement('div');
+                message.className = 'job-progress-message';
+                message.textContent = progressMessage;
+                progressInfoBlock.appendChild(message);
+            }
+
+            details.appendChild(progressInfoBlock);
+        }
+
+        if (job.status !== 'running' && terminalMessage) {
+            const terminal = document.createElement('div');
+            terminal.className = 'job-progress-message';
+            terminal.textContent = terminalMessage;
+            details.appendChild(terminal);
+        }
+
+        if (job.status === 'completed' && progressInfo) {
+            const processedRow = document.createElement('div');
+            const strong = document.createElement('strong');
+            strong.textContent = '处理数量:';
+            processedRow.append(strong, document.createTextNode(` ${progressInfo}`));
+            details.appendChild(processedRow);
+        }
+
+        if (job.error) {
+            const errorRow = document.createElement('div');
+            errorRow.className = 'job-error';
+            const strong = document.createElement('strong');
+            strong.textContent = '错误:';
+            errorRow.append(strong, document.createTextNode(` ${job.error}`));
+            details.appendChild(errorRow);
+        }
+
+        jobItem.append(header, details);
+        fragment.appendChild(jobItem);
+    });
+
+    clearElement(jobList);
+    jobList.appendChild(fragment);
 }
 
 // Load and update system stats
 async function loadSystemStats() {
     try {
-        const response = await fetch('/api/system-stats');
-        const data = await readApiPayload(response);
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to load system stats');
-        }
+        const data = await requestJson('/api/system-stats');
 
         // Update CPU usage
         const cpuUsage = document.getElementById('cpu-usage');
         if (cpuUsage) {
-            cpuUsage.textContent = `${data.cpu_percent}%`;
-            // Change color based on usage
-            if (data.cpu_percent > 80) {
-                cpuUsage.style.color = 'var(--accent-error)';
-            } else if (data.cpu_percent > 50) {
-                cpuUsage.style.color = 'var(--accent-warning)';
-            } else {
-                cpuUsage.style.color = 'var(--accent-success)';
-            }
+            setStatValue(cpuUsage, `${data.cpu_percent}%`, Number(data.cpu_percent || 0));
         }
 
         // Update memory usage
         const memoryUsage = document.getElementById('memory-usage');
         if (memoryUsage) {
-            memoryUsage.textContent = `${data.memory_percent}% (${data.memory_used_gb}/${data.memory_total_gb}GB)`;
-            // Change color based on usage
-            if (data.memory_percent > 80) {
-                memoryUsage.style.color = 'var(--accent-error)';
-            } else if (data.memory_percent > 50) {
-                memoryUsage.style.color = 'var(--accent-warning)';
-            } else {
-                memoryUsage.style.color = 'var(--accent-success)';
-            }
+            setStatValue(
+                memoryUsage,
+                `${data.memory_percent}% (${data.memory_used_gb}/${data.memory_total_gb}GB)`,
+                Number(data.memory_percent || 0)
+            );
         }
 
     } catch (error) {
@@ -885,7 +1013,7 @@ async function loadSystemStats() {
 // Auto-refresh job list every 5 seconds
 setInterval(() => {
     loadJobs();
-}, 5000);
+}, JOB_LIST_POLL_MS);
 
 // Load and update console output
 async function loadConsoleOutput() {
@@ -897,12 +1025,7 @@ async function loadConsoleOutput() {
     consolePollInFlight = true;
 
     try {
-        const response = await fetch('/api/console-output');
-        const data = await readApiPayload(response);
-        if (!response.ok) {
-            throw new Error(data.error || 'Failed to load console output');
-        }
-
+        const data = await requestJson('/api/console-output');
         renderConsoleOutputs(data.output || []);
 
     } catch (error) {
@@ -916,7 +1039,7 @@ async function loadConsoleOutput() {
 // Auto-refresh system stats every 1 second
 setInterval(() => {
     loadSystemStats();
-}, 1000);
+}, SYSTEM_STATS_POLL_MS);
 
 // Load system stats and console output on page load
 loadSystemStats();

@@ -1,60 +1,74 @@
-# Task Plan: CPU 利用率与单 Job 多漫画并行可行性调研
+# Task Plan: Web 页面布局与 PDF 保留逻辑调整
 
 ## Goal
-评估当前 `web_server.py` 的 3 个并行 worker 为什么对 CPU 占用提升有限；同时研究单 job 在“一个漫画目录内含多本漫画文件”场景下，是否值得从当前串行转换升级为“同一 job 内多本漫画并行转换”，若可行且收益明显，则给出可执行修改计划。
+根据用户最新需求调整 ComicPacker Web 页面：重排四块面板布局、压缩配置表单、补充 hover 说明、移除“命名来源”行，并新增“保留 PDF 格式”选项及其后端删除 PDF 目录逻辑，确保现有转换流程不回归。
+
+## Scope
+- `templates/index.html`
+- `static/style.css`
+- `static/app.js`
+- `web_server.py`
+- `main.py`
+- `tests/` 下与 Web/API/输出保留逻辑直接相关的测试
+- `task_plan.md`
+- `findings.md`
+- `progress.md`
 
 ## Current Phase
-Phase 3: 并行可行性分析与方案规划
+Phase 3 — Verification & Report (complete)
+
+## Implementation Plan
+1. 复查当前四面板布局、表单结构、MOBI/PDF 相关前后端参数流。
+2. 先确定 UI 结构与状态规则，再最小修改 HTML/CSS/JS。
+3. 为“保留 PDF”逻辑补后端支持与回归测试。
+4. 完成后运行语法与测试验证，并记录剩余风险。
 
 ## Phases
-### Phase 0: Context Recovery
-- [x] 运行 session catchup 并读取现有 planning files
-- [x] 读取 OMX 状态 / notepad / project memory
-- [x] 确认当前仓库无更深层 AGENTS 影响业务代码改动
+### Phase 0: Audit & Design
+- [x] 读取 planning-with-files 技能与现有 planning files
+- [x] 审查当前 HTML/CSS/JS 与后端转换入口
+- [x] 记录本轮 UI/功能变更约束与实现方案
 - **Status:** complete
 
-### Phase 1: Code Path Mapping
-- [x] 定位 Web worker pool、job queue 与系统资源统计入口
-- [x] 定位主转换路径（batch/book/cbz/pdf）与现有并行逻辑
-- [x] 确认单 job 内“多本漫画”当前是否为串行处理
+### Phase 1: UI / UX Implementation
+- [x] 重排四块面板为统一自适应网格
+- [x] 调整表单为紧凑的 inline label/control 布局
+- [x] 为 select 增加 hover 说明按钮并更新模式文案
+- [x] 删除“命名来源”展示行
 - **Status:** complete
 
-### Phase 2: Baseline Measurement
-- [x] 选取代表性样本并测量当前单 job / 多 job 的 CPU 利用率与耗时
-- [x] 判断瓶颈更偏向 CPU、I/O、进程池创建开销还是串行外围逻辑
-- [x] 记录当前 3 worker 继续加大时的潜在限制因素
+### Phase 2: Conversion Retention Logic
+- [x] 前端新增“保留 PDF 格式”选项与启用/禁用逻辑
+- [x] 后端接收 `keep_pdf` 参数并在不保留时删除 PDF 目录
+- [x] 为 API/转换输出保留逻辑补充回归测试
 - **Status:** complete
 
-### Phase 3: Parallelization Feasibility
-- [x] 评估单 job 内对多本漫画做并行转换的改造点、风险点与约束
-- [x] 估算潜在收益（吞吐 / CPU 占用 / 内存）
-- [x] 判断是否值得推进实现
-- **Status:** complete
-
-### Phase 4: Planning Output
-- [x] 汇总结论
-- [x] 若值得实施，输出分阶段修改计划、测试计划与回滚关注点
+### Phase 3: Verification & Report
+- [x] 运行 JS / Python 语法检查
+- [x] 运行相关单元测试
+- [x] 复查 diff、更新 findings/progress、整理结果
 - **Status:** complete
 
 ## Key Questions
-1. 当前 3 个 web worker 对 CPU 利用率提升有限，究竟卡在 Web 层、单 job 内部串行逻辑，还是图片预处理/压缩流程本身？
-2. 现有单 job 内每本漫画（ZIP/CBZ/PDF）是否确实逐本串行执行？
-3. 如果把“逐本漫画”提升为 job 内并行，是否会与现有 `ProcessPoolExecutor` 预处理并行产生过度嵌套并发？
-4. 在 12 核机器上，更高 CPU 占用是否能换来稳定吞吐提升，还是会被磁盘 IO / 内存 / 子进程开销抵消？
-5. 如果推进改造，最小可行方案应该落在哪一层：Web worker 数、预处理 worker 数、自适应限流，还是 job 内多漫画 worker pool？
+1. 四个面板如何在保持信息层级的同时实现上下同列宽、左右同行高？
+2. “保留 PDF”在 PDF->MOBI 模式下是否只影响输出目录中的 `pdf/` 子目录？
+3. 哪些现有测试最适合承接新参数与目录清理行为？
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| 先做代码路径与基线测量，再讨论改造 | 用户要求的是“研究是否值得改”，需要先确认瓶颈来源而不是直接实施 |
-| 优先选择真实样本的子集做代表性压测 | 合成样本难以准确体现 ZIP/CBZ 解压、PIL 解码、PDF 写入与 KCC 等混合负载 |
-| 若做 job 内并行评估，要同时考虑与现有图片预处理进程池的叠加效应 | 外层多漫画并行 + 内层图片预处理并行，可能导致 CPU 超卖和内存放大 |
+| 继续使用 planning-with-files 落盘 | 任务跨 UI、前端状态、后端逻辑与测试多个阶段 |
+| 优先做最小范围结构调整 | 用户需求明确，但需避免无关大改 |
+| 沿用原生 HTML/CSS/JS | 现有页面无构建系统，不引入新依赖 |
+| `keep_pdf` 在 Web API 层默认受 `convert_to_mobi` 约束 | 避免前端以外调用传入不一致状态 |
+| PDF 目录删除收敛到 `main.py` 公共 helper | 减少 batch/book/cbz/pdf 四种流程中的重复逻辑 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| `omx explore` 依赖缺失（cargo not found） | 1 | 回退为直接读取源码、测试和运行本地 benchmark |
+| 暂无 | - | - |
 
 ## Notes
-- 现有 planning files 中保留了此前任务的长期记录；本次 `task_plan.md` 已切换为当前调研主题。
-- 当前重点是“是否值得改 + 怎么改”，不是立刻提交实现。
+- 本轮任务基于 2026-04-16 已完成的 UI 重构继续迭代，优先满足用户新增交互与布局要求。
+- `keep_pdf=false` 时，batch/book/cbz 会在 MOBI 成功生成后删除输出目录中的 `pdf/` 子目录；pdf 模式则删除空的输出 `pdf/` 子目录，只保留 `mobi/`。
+- 已完成验证：`node --check static/app.js`、`python3 -m py_compile web_server.py main.py tests/test_web_ui_api.py tests/test_output_retention.py`、`conda run -n comic python -m unittest discover -s tests -p 'test_*.py'`。
