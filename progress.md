@@ -385,3 +385,88 @@
 | cbz PDF 页数回归 | 合成 `Vol.01.cbz`（2 章节/4 张图） | PDF `Pages = 4` | 通过 | ✓ |
 | 真实 ZIP 基准 | `尖帽子的魔法工坊 Vol.04.zip` | 降低 RSS，最好也改善耗时 | `50.38s -> 44.44s`，`1223900 kB -> 718336 kB` | ✓ |
 | 真实 CBZ 基准 | `Vol.01.cbz` | 降低 RSS，最好也改善耗时 | `59.29s -> 52.84s`，`1145536 kB -> 869624 kB` | ✓ |
+
+### Session Addendum: planning-with-files 恢复验证（2026-04-15）
+- **Status:** complete
+- **Actions taken:**
+  - 运行 `session-catchup.py`，并重新读取 `task_plan.md`、`findings.md`、`progress.md` 恢复上下文。
+  - 通过 `git diff --stat` 与 `git status --short` 确认当前工作区仍是第二阶段实现后的未提交状态。
+  - 重新执行 `python3 -m py_compile main.py web_server.py tests/test_preprocess.py tests/test_pdf_workflows.py`。
+  - 重新执行 `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'`，确认 8 个测试全部通过。
+  - 维持 `task_plan.md` 当前阶段为 `Complete`，不重开实施阶段。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Session Addendum: Web 多 worker 并行升级（设计启动，2026-04-15）
+- **Status:** in_progress
+- **Actions taken:**
+  - 运行 `session-catchup.py`，确认上一轮性能优化任务已完成。
+  - 将 `task_plan.md` 重置为“Web 多 worker 并行任务执行升级”新计划。
+  - 读取 `web_server.py` 当前 job queue、worker、console capture、取消与 job API 路径。
+  - 确认当前 bottleneck 为“只启动 1 个后台 worker 线程”，并识别出多 worker 下的关键风险：全局 `sys.stdout` 重定向、共享取消集合、全局 console 输出串台。
+  - 确认前端当前只依赖 `/api/jobs` 与 `/api/console-output` 的既有契约，后端可在不改 UI 协议的前提下完成并发升级。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+### Session Addendum: Web 多 worker 并行升级（实现与验证完成，2026-04-15）
+- **Status:** complete
+- **Actions taken:**
+  - 将 `web_server.py` 的单 worker 模型重构为可配置 worker pool，并保留原有 `job_queue` + job 状态流。
+  - 新增 `JobScopedOutput` 与 `bind_job_console(job_id)`，把并发转换日志按 job 归属路由到 Web 控制台输出。
+  - 将 `jobs_lock` 升级为 `RLock`，并整理取消检查 helper，避免多线程下状态切换更脏。
+  - 为 job 元数据新增 `worker` 字段，并让 `/api/system-stats` 返回 worker / running / pending 概况。
+  - 新增 `tests/test_web_workers.py`，锁定并行运行、pending 取消、日志隔离三条关键回归。
+  - 重新执行语法检查与全量测试，确认现有 PDF / CBZ / 预处理测试与新增 Web 并发测试全部通过。
+- **Files created/modified:**
+  - web_server.py
+  - tests/test_web_workers.py
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+## Additional Test Results: web multi-worker upgrade
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Python 语法检查 | `python3 -m py_compile main.py web_server.py tests/test_preprocess.py tests/test_pdf_workflows.py tests/test_web_workers.py` | 无语法错误 | 通过 | ✓ |
+| 全量单元/回归测试 | `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` | 所有现有测试 + 新增 Web 并发测试全部通过 | 11 个测试通过 | ✓ |
+| Web 并行运行回归 | `test_jobs_can_run_in_parallel_with_multiple_workers` | 两个任务可同时进入 `running` | 通过 | ✓ |
+| Web pending 取消回归 | `test_pending_job_can_be_cancelled_while_another_worker_is_busy` | 第二个等待中的任务可在启动前取消 | 通过 | ✓ |
+| Web 日志隔离回归 | `test_console_output_keeps_job_prefixes_under_parallel_execution` | 并发日志保留各自 job 前缀，不串台 | 通过 | ✓ |
+
+### Session Addendum: CPU 利用率与单 Job 并行调研
+- **Status:** in_progress
+- **Actions taken:**
+  - 运行 planning-with-files session catchup，并读取 OMX 状态 / notepad / project memory。
+  - 确认 `project-memory` / `notepad` 当前为空，现有运行态主要来自 `.omx/state`。
+  - 尝试使用 `omx explore` 做只读映射，但因缺少 cargo / explore harness 回退为直接源码审查。
+  - 定位 `web_server.py` 中的 `job_queue`、`worker_thread`、`process_job`、`get_system_stats` 与 `create_job`。
+  - 定位 `main.py` 中的 `preprocess_images` / `ProcessPoolExecutor` 以及 `pack_comics_by_book`、`convert_cbz_to_pdf`、`convert_pdf_folder_to_mobi` 的外层串行循环。
+  - 检查真实样本目录规模，确认当前研究对象包含大体量 ZIP/CBZ/PDF 漫画数据，适合做代表性 benchmark。
+- **Files created/modified:**
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+
+### Session Addendum: CPU 基线测量与外层并行原型
+- **Status:** complete
+- **Actions taken:**
+  - 用真实 CBZ 样本 `相反的你和我 Vol.01.cbz` 做单卷 smoke test，确认当前路径单卷约 58s，且未触发图片预处理并行。
+  - 用真实 ZIP 样本 `尖帽子的魔法工坊 Vol.01.zip` 做单卷 smoke test，确认当前路径约 48s，且大多数 32 页块会触发 4 进程预处理。
+  - 对 `相反的你和我 Vol.01~03.cbz` 构建“当前串行 / 外层按卷并行 2 / 外层按卷并行 3”原型 benchmark，并记录耗时、平均核利用率、峰值 RSS。
+  - 结合源码与 benchmark，确认当前 3 worker 提升有限的核心原因是：单 job 内逐卷串行，而很多 CBZ 样本单卷内部又没有触发预处理并行。
+- **Benchmark summary:**
+  - 串行 3 卷：176.39s / avg 1.01 cores / peak RSS 932.9MB
+  - 外层并行 2：104.54s / avg 1.68 cores / peak RSS 2760.8MB
+  - 外层并行 3：62.97s / avg 2.51 cores / peak RSS 3679.0MB
+- **Files created/modified:**
+  - /tmp/cbz_parallel_bench.py (临时 benchmark 脚本)
+  - task_plan.md
+  - findings.md
+  - progress.md
+
+- **Cleanup:** 已删除 `/tmp` 与 `/mnt` 下用于本次 benchmark 的临时脚本和输出目录，仅保留 planning files 中的结论与数据。

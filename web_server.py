@@ -14,6 +14,7 @@ import io
 import logging
 import re
 from pathlib import Path
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
 from flask import Flask, render_template, request, jsonify, Response, send_file
@@ -37,11 +38,12 @@ CORS(app)
 # 全局变量
 job_queue = queue.Queue()
 jobs: Dict[str, dict] = {}
-jobs_lock = threading.Lock()
+jobs_lock = threading.RLock()
 cancelled_jobs = set()  # 跟踪被取消的任务
 console_output = []  # 存储最新的控制台输出
 console_output_lock = threading.Lock()
 config_lock = threading.Lock()
+worker_pool_lock = threading.Lock()
 MAX_CONSOLE_LINES = 20  # 最多保留20行输出
 COMIC_FILE_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
 CONVERTIBLE_COMIC_EXTENSIONS = {'.zip', '.cbz', '.pdf'}
@@ -52,6 +54,11 @@ FOLDER_METADATA_BLACKLIST = {
 }
 CONFIG_PATH = Path(__file__).with_name('config.toml')
 BROWSE_ROOT = Path('/mnt').resolve()
+WORKER_STOP = object()
+worker_threads: List[threading.Thread] = []
+thread_output_state = threading.local()
+ORIGINAL_STDOUT = sys.stdout
+ORIGINAL_STDERR = sys.stderr
 
 
 def configure_server_logging():
@@ -66,6 +73,135 @@ def configure_server_logging():
         flask.cli.show_server_banner = lambda *args, **kwargs: None
     except Exception:
         pass
+
+
+def get_web_worker_count() -> int:
+    """返回 Web 后台 worker 数，默认保守并行。"""
+    default_workers = max(1, min(2, os.cpu_count() or 1))
+    raw_value = os.environ.get('COMICPACKER_WEB_WORKERS', '').strip()
+
+    if not raw_value:
+        return default_workers
+
+    try:
+        configured = int(raw_value)
+        if configured < 1:
+            raise ValueError
+        return configured
+    except ValueError:
+        print(
+            f"[CONFIG] Invalid COMICPACKER_WEB_WORKERS={raw_value!r}, "
+            f"fallback to {default_workers}"
+        )
+        return default_workers
+
+
+def is_job_cancelled(job_id: str) -> bool:
+    with jobs_lock:
+        return job_id in cancelled_jobs
+
+
+def clear_job_cancellation(job_id: str):
+    with jobs_lock:
+        cancelled_jobs.discard(job_id)
+
+
+def format_console_line(line: str, job_id: Optional[str] = None) -> str:
+    if job_id:
+        return f"[{job_id[:8]}] {line}"
+    return line
+
+
+class JobScopedOutput(io.TextIOBase):
+    """根据当前线程绑定的 job_id，把输出路由到对应控制台缓冲。"""
+
+    def __init__(self, fallback_stream, stream_name: str):
+        self.fallback_stream = fallback_stream
+        self.stream_name = stream_name
+        self.buffer_attr = f'{stream_name}_buffer'
+
+    def writable(self):
+        return True
+
+    def write(self, text):
+        if not text:
+            return 0
+
+        job_id = getattr(thread_output_state, 'job_id', None)
+        if not job_id:
+            self.fallback_stream.write(text)
+            return len(text)
+
+        buffer = getattr(thread_output_state, self.buffer_attr, '')
+        buffer += text
+
+        while '\n' in buffer:
+            line, buffer = buffer.split('\n', 1)
+            clean_line = line.rstrip('\r')
+            if clean_line.strip():
+                add_console_output(clean_line, job_id=job_id)
+
+        setattr(thread_output_state, self.buffer_attr, buffer)
+        return len(text)
+
+    def flush(self):
+        job_id = getattr(thread_output_state, 'job_id', None)
+        if not job_id:
+            self.fallback_stream.flush()
+            return
+
+        buffer = getattr(thread_output_state, self.buffer_attr, '')
+        if buffer:
+            clean_line = buffer.rstrip('\r')
+            if clean_line.strip():
+                add_console_output(clean_line, job_id=job_id)
+        setattr(thread_output_state, self.buffer_attr, '')
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def isatty(self):
+        return getattr(self.fallback_stream, 'isatty', lambda: False)()
+
+    def fileno(self):
+        if hasattr(self.fallback_stream, 'fileno'):
+            return self.fallback_stream.fileno()
+        raise io.UnsupportedOperation('fileno')
+
+    @property
+    def encoding(self):
+        return getattr(self.fallback_stream, 'encoding', 'utf-8')
+
+    @property
+    def errors(self):
+        return getattr(self.fallback_stream, 'errors', 'strict')
+
+    def __getattr__(self, name):
+        return getattr(self.fallback_stream, name)
+
+
+@contextmanager
+def bind_job_console(job_id: str):
+    previous_job_id = getattr(thread_output_state, 'job_id', None)
+    previous_stdout_buffer = getattr(thread_output_state, 'stdout_buffer', '')
+    previous_stderr_buffer = getattr(thread_output_state, 'stderr_buffer', '')
+
+    thread_output_state.job_id = job_id
+    thread_output_state.stdout_buffer = ''
+    thread_output_state.stderr_buffer = ''
+    try:
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        thread_output_state.job_id = previous_job_id
+        thread_output_state.stdout_buffer = previous_stdout_buffer
+        thread_output_state.stderr_buffer = previous_stderr_buffer
+
+
+sys.stdout = JobScopedOutput(ORIGINAL_STDOUT, 'stdout')
+sys.stderr = JobScopedOutput(ORIGINAL_STDERR, 'stderr')
 
 
 def is_allowed_path(path: Path) -> bool:
@@ -347,30 +483,12 @@ def analyze_comic_folder(folder_path: str) -> dict:
         'convertible_file_count': len(convertible_files)
     }
 
-
-class ConsoleCapture(io.StringIO):
-    """捕获stdout输出的自定义类"""
-    
-    def write(self, text):
-        """重写write方法以捕获输出"""
-        # 调用父类的write方法
-        super().write(text)
-        
-        # 如果不是空行或只有换行符，添加到控制台输出
-        if text and text.strip():
-            # 移除多余的换行符
-            clean_text = text.rstrip('\n')
-            if clean_text:
-                add_console_output(clean_text)
-        
-        return len(text)
-
-
-def add_console_output(line: str):
+def add_console_output(line: str, job_id: Optional[str] = None):
     """添加一行控制台输出"""
+    formatted_line = format_console_line(line, job_id=job_id)
     with console_output_lock:
-        console_output.append(line)
-        # 只保留最新的5行
+        console_output.append(formatted_line)
+        # 只保留最近的输出窗口
         if len(console_output) > MAX_CONSOLE_LINES:
             console_output.pop(0)
 
@@ -385,7 +503,7 @@ class ProgressTracker:
     def update(self, stage: str, current: int, total: int, message: str):
         """更新进度"""
         # 检查任务是否被取消
-        if self.job_id in cancelled_jobs:
+        if is_job_cancelled(self.job_id):
             print(f"[TRACKER] Job {self.job_id} cancellation detected")
             raise Exception(f"Job {self.job_id} was cancelled by user")
         
@@ -406,172 +524,215 @@ class ProgressTracker:
                 jobs[self.job_id]['logs'].append(log_entry)
 
 
-def worker_thread():
-    """后台工作线程，处理转换任务"""
-    print("[WORKER] Worker thread started")
-    while True:
-        try:
-            job_id = job_queue.get()
-            
+def process_job(job_id: str, worker_name: str):
+    with jobs_lock:
+        if job_id not in jobs:
+            print(f"[{worker_name}] Job {job_id} not found in jobs dict, skipping")
+            return
+
+        job = jobs[job_id]
+
+        if job_id in cancelled_jobs:
+            print(f"[{worker_name}] Job {job_id} was cancelled before starting")
+            job['status'] = 'cancelled'
+            job['end_time'] = datetime.now().isoformat()
+            job['error'] = '任务已取消'
+            job['worker'] = worker_name
+            job['progress'] = {
+                'stage': 'cancelled',
+                'current': 0,
+                'total': 100,
+                'message': '任务在启动前被取消',
+                'percentage': 0
+            }
+            job['last_update'] = datetime.now().isoformat()
+            cancelled_jobs.discard(job_id)
+            return
+
+        job['status'] = 'running'
+        job['start_time'] = datetime.now().isoformat()
+        job['last_update'] = datetime.now().isoformat()
+        job['worker'] = worker_name
+        params = dict(job['parameters'])
+
+    print(f"[{worker_name}] Job {job_id} started ({params.get('mode', 'batch')})")
+
+    tracker = ProgressTracker(job_id)
+
+    try:
+        with bind_job_console(job_id):
+            mode = params.get('mode', 'batch')
+            comic_name = params.get('comic_name', '').strip()
+
+            print(f"[{worker_name}] Starting conversion in {mode} mode")
+            tracker.update('init', 0, 100, f'开始 {mode} 模式转换...')
+
+            if mode == 'batch':
+                pack_comics_to_pdf_with_progress(
+                    folder_path=params['folder'],
+                    batch_size=params.get('batch_size', 10),
+                    pdf_prefix=params.get('prefix', ''),
+                    output_folder=params.get('output', './output'),
+                    convert_to_mobi=params.get('convert_to_mobi', False),
+                    kindle_profile=params.get('kindle_profile', 'KPW5'),
+                    progress_callback=tracker.update,
+                    comic_name=comic_name
+                )
+            elif mode == 'book':
+                pack_comics_by_book_with_progress(
+                    folder_path=params['folder'],
+                    pdf_prefix=params.get('prefix', ''),
+                    output_folder=params.get('output', './output'),
+                    convert_to_mobi=params.get('convert_to_mobi', False),
+                    kindle_profile=params.get('kindle_profile', 'KPW5'),
+                    progress_callback=tracker.update,
+                    comic_name=comic_name
+                )
+            elif mode == 'cbz':
+                convert_cbz_to_pdf_with_progress(
+                    folder_path=params['folder'],
+                    cbz_prefix=params.get('prefix', ''),
+                    output_folder=params.get('output', './output'),
+                    convert_to_mobi=params.get('convert_to_mobi', False),
+                    kindle_profile=params.get('kindle_profile', 'KPW5'),
+                    progress_callback=tracker.update,
+                    comic_name=comic_name
+                )
+            elif mode == 'pdf':
+                convert_pdf_folder_to_mobi_with_progress(
+                    folder_path=params['folder'],
+                    output_folder=params.get('output', './output'),
+                    kindle_profile=params.get('kindle_profile', 'KPW5'),
+                    progress_callback=tracker.update,
+                    comic_name=comic_name
+                )
+            else:
+                raise ValueError(f'不支持的模式: {mode}')
+
+        print(f"[{worker_name}] Job {job_id} completed successfully with verified outputs")
+        with jobs_lock:
+            if job_id not in jobs:
+                return
+
+            progress = jobs[job_id].get('progress', {})
+            if progress.get('stage') != 'completed':
+                current = progress.get('current', 0)
+                total = progress.get('total', current)
+                jobs[job_id]['progress'] = {
+                    'stage': 'completed',
+                    'current': current,
+                    'total': total,
+                    'message': '任务已完成，输出文件已写入目标目录',
+                    'percentage': 100
+                }
+            else:
+                jobs[job_id]['progress']['percentage'] = 100
+                jobs[job_id]['progress']['message'] = (
+                    jobs[job_id]['progress'].get('message')
+                    or '任务已完成，输出文件已写入目标目录'
+                )
+
+            if jobs[job_id]['status'] != 'completed':
+                jobs[job_id]['status'] = 'completed'
+            jobs[job_id]['end_time'] = datetime.now().isoformat()
+            jobs[job_id]['last_update'] = datetime.now().isoformat()
+    except Exception as e:
+        if "cancelled" in str(e).lower() or is_job_cancelled(job_id):
+            print(f"[{worker_name}] Job {job_id} was cancelled")
             with jobs_lock:
-                if job_id not in jobs:
-                    print(f"[WORKER] Job {job_id} not found in jobs dict, skipping")
-                    continue
-                    
-                job = jobs[job_id]
-                
-                # 检查任务是否已被取消
-                if job_id in cancelled_jobs:
-                    print(f"[WORKER] Job {job_id} was cancelled before starting")
-                    job['status'] = 'cancelled'
-                    job['end_time'] = datetime.now().isoformat()
-                    job['error'] = '任务已取消'
-                    # 更新进度以通知前端
-                    job['progress'] = {
+                if job_id in jobs:
+                    jobs[job_id]['status'] = 'cancelled'
+                    jobs[job_id]['end_time'] = datetime.now().isoformat()
+                    jobs[job_id]['error'] = '任务已取消'
+                    jobs[job_id]['worker'] = worker_name
+                    jobs[job_id]['progress'] = {
                         'stage': 'cancelled',
                         'current': 0,
                         'total': 100,
-                        'message': '任务在启动前被取消',
+                        'message': '任务已被用户取消',
                         'percentage': 0
                     }
-                    job['last_update'] = datetime.now().isoformat()
-                    cancelled_jobs.discard(job_id)
-                    job_queue.task_done()
-                    continue
-                
-                job['status'] = 'running'
-                job['start_time'] = datetime.now().isoformat()
-                print(f"[WORKER] Job {job_id} started ({job['parameters'].get('mode', 'batch')})")
-            
-            # 创建进度跟踪器
-            tracker = ProgressTracker(job_id)
-            
-            # 保存原始stdout
-            original_stdout = sys.stdout
-            
-            try:
-                # 重定向stdout到我们的捕获器
-                console_capture = ConsoleCapture()
-                sys.stdout = console_capture
-                
-                # 执行转换任务
-                params = job['parameters']
-                mode = params.get('mode', 'batch')
-                comic_name = params.get('comic_name', '').strip()
-                
-                print(f"[WORKER] Starting conversion in {mode} mode")
-                tracker.update('init', 0, 100, f'开始 {mode} 模式转换...')
-                
-                if mode == 'batch':
-                    pack_comics_to_pdf_with_progress(
-                        folder_path=params['folder'],
-                        batch_size=params.get('batch_size', 10),
-                        pdf_prefix=params.get('prefix', ''),
-                        output_folder=params.get('output', './output'),
-                        convert_to_mobi=params.get('convert_to_mobi', False),
-                        kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update,
-                        comic_name=comic_name
-                    )
-                elif mode == 'book':
-                    pack_comics_by_book_with_progress(
-                        folder_path=params['folder'],
-                        pdf_prefix=params.get('prefix', ''),
-                        output_folder=params.get('output', './output'),
-                        convert_to_mobi=params.get('convert_to_mobi', False),
-                        kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update,
-                        comic_name=comic_name
-                    )
-                elif mode == 'cbz':
-                    convert_cbz_to_pdf_with_progress(
-                        folder_path=params['folder'],
-                        cbz_prefix=params.get('prefix', ''),
-                        output_folder=params.get('output', './output'),
-                        convert_to_mobi=params.get('convert_to_mobi', False),
-                        kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update,
-                        comic_name=comic_name
-                    )
-                elif mode == 'pdf':
-                    convert_pdf_folder_to_mobi_with_progress(
-                        folder_path=params['folder'],
-                        output_folder=params.get('output', './output'),
-                        kindle_profile=params.get('kindle_profile', 'KPW5'),
-                        progress_callback=tracker.update,
-                        comic_name=comic_name
-                    )
-                
-                # 任务完成
-                print(f"[WORKER] Job {job_id} completed successfully with verified outputs")
-                with jobs_lock:
-                    progress = jobs[job_id].get('progress', {})
-                    if progress.get('stage') != 'completed':
-                        current = progress.get('current', 0)
-                        total = progress.get('total', current)
-                        jobs[job_id]['progress'] = {
-                            'stage': 'completed',
-                            'current': current,
-                            'total': total,
-                            'message': '任务已完成，输出文件已写入目标目录',
-                            'percentage': 100
-                        }
-                    else:
-                        jobs[job_id]['progress']['percentage'] = 100
-                        jobs[job_id]['progress']['message'] = (
-                            jobs[job_id]['progress'].get('message')
-                            or '任务已完成，输出文件已写入目标目录'
-                        )
-
-                    if jobs[job_id]['status'] != 'completed':
-                        jobs[job_id]['status'] = 'completed'
-                    jobs[job_id]['end_time'] = datetime.now().isoformat()
                     jobs[job_id]['last_update'] = datetime.now().isoformat()
-                    
-            except Exception as e:
-                # 检查是否是取消异常
-                if "cancelled" in str(e).lower() or job_id in cancelled_jobs:
-                    print(f"[WORKER] Job {job_id} was cancelled")
-                    with jobs_lock:
-                        jobs[job_id]['status'] = 'cancelled'
-                        jobs[job_id]['end_time'] = datetime.now().isoformat()
-                        jobs[job_id]['error'] = '任务已取消'
-                        # 更新进度以通知前端
-                        jobs[job_id]['progress'] = {
-                            'stage': 'cancelled',
-                            'current': 0,
-                            'total': 100,
-                            'message': '任务已被用户取消',
-                            'percentage': 0
-                        }
-                        jobs[job_id]['last_update'] = datetime.now().isoformat()
-                        cancelled_jobs.discard(job_id)
-                else:
-                    # 任务失败
-                    print(f"[WORKER] Job {job_id} failed with error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    failure_message = f'转换失败: {str(e)}'
-                    with jobs_lock:
-                        jobs[job_id]['status'] = 'failed'
-                        jobs[job_id]['end_time'] = datetime.now().isoformat()
-                        jobs[job_id]['error'] = str(e)
-                    tracker.update('error', 0, 100, failure_message)
-            
-            finally:
-                # 恢复原始stdout
-                sys.stdout = original_stdout
-                job_queue.task_done()
-                
-        except Exception as e:
-            print(f"[WORKER] Worker thread error: {e}")
+            clear_job_cancellation(job_id)
+        else:
+            print(f"[{worker_name}] Job {job_id} failed with error: {e}")
             import traceback
             traceback.print_exc()
+            failure_message = f'转换失败: {str(e)}'
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]['status'] = 'failed'
+                    jobs[job_id]['end_time'] = datetime.now().isoformat()
+                    jobs[job_id]['error'] = str(e)
+                    jobs[job_id]['worker'] = worker_name
+            tracker.update('error', 0, 100, failure_message)
 
 
-# 启动工作线程
-worker = threading.Thread(target=worker_thread, daemon=True)
-worker.start()
+def worker_thread(worker_name: str):
+    """后台工作线程，处理转换任务。"""
+    print(f"[{worker_name}] Worker thread started")
+    while True:
+        job_id = job_queue.get()
+        try:
+            if job_id is WORKER_STOP:
+                print(f"[{worker_name}] Worker thread stopping")
+                return
+            process_job(job_id, worker_name)
+        except Exception as e:
+            print(f"[{worker_name}] Worker thread error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            job_queue.task_done()
+
+
+def shutdown_worker_pool(timeout: float = 1.0):
+    """停止当前 worker pool（主要供测试或重配置使用）。"""
+    with worker_pool_lock:
+        if not worker_threads:
+            return
+
+        threads_to_stop = list(worker_threads)
+        for _ in threads_to_stop:
+            job_queue.put(WORKER_STOP)
+
+        for thread in threads_to_stop:
+            thread.join(timeout=timeout)
+
+        worker_threads.clear()
+
+
+def start_worker_pool(worker_count: Optional[int] = None, force: bool = False):
+    """启动后台 worker pool。"""
+    desired_workers = worker_count or get_web_worker_count()
+
+    with worker_pool_lock:
+        if force and worker_threads:
+            pass
+        elif worker_threads:
+            return
+
+    if force:
+        shutdown_worker_pool()
+
+    with worker_pool_lock:
+        if worker_threads:
+            return
+
+        for index in range(desired_workers):
+            worker_name = f"worker-{index + 1}"
+            thread = threading.Thread(
+                target=worker_thread,
+                args=(worker_name,),
+                name=worker_name,
+                daemon=True,
+            )
+            thread.start()
+            worker_threads.append(thread)
+
+
+# 启动工作线程池
+start_worker_pool()
 
 
 # ============= 带进度回调的转换函数 =============
@@ -831,12 +992,19 @@ def get_system_stats():
         memory_percent = memory.percent
         memory_used_gb = memory.used / (1024 ** 3)
         memory_total_gb = memory.total / (1024 ** 3)
+
+        with jobs_lock:
+            running_jobs = sum(1 for job in jobs.values() if job['status'] == 'running')
+            pending_jobs = sum(1 for job in jobs.values() if job['status'] == 'pending')
         
         return jsonify({
             'cpu_percent': round(cpu_percent, 1),
             'memory_percent': round(memory_percent, 1),
             'memory_used_gb': round(memory_used_gb, 2),
-            'memory_total_gb': round(memory_total_gb, 2)
+            'memory_total_gb': round(memory_total_gb, 2),
+            'configured_web_workers': len(worker_threads),
+            'running_jobs': running_jobs,
+            'pending_jobs': pending_jobs
         })
         
     except Exception as e:
@@ -928,6 +1096,7 @@ def create_job():
             'created_time': datetime.now().isoformat(),
             'start_time': None,
             'end_time': None,
+            'worker': None,
             'progress': {
                 'stage': 'pending',
                 'current': 0,
@@ -942,6 +1111,8 @@ def create_job():
         with jobs_lock:
             jobs[job_id] = job
         
+        start_worker_pool()
+
         # 添加到队列
         job_queue.put(job_id)
         print(f"[JOB] Created job {job_id} ({params.get('mode', 'batch')})")
@@ -1074,6 +1245,7 @@ if __name__ == '__main__':
     print(f"漫画目录: {config['comic_folder']}")
     print(f"输出目录: {config['output_folder']}")
     print(f"浏览限制: {BROWSE_ROOT}/")
+    print(f"后台worker数: {len(worker_threads)} (可用 COMICPACKER_WEB_WORKERS 调整)")
     print("按 Ctrl+C 停止服务器")
     print("=" * 60)
     

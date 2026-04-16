@@ -8,6 +8,54 @@ echo ""
 
 PYTHON=""
 PYTHON_DESC=""
+WEB_WORKERS_DEFAULT=""
+
+detect_cpu_count() {
+    local cpu_count=""
+
+    if command -v getconf >/dev/null 2>&1; then
+        cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    fi
+
+    if [ -z "$cpu_count" ] && command -v nproc >/dev/null 2>&1; then
+        cpu_count="$(nproc 2>/dev/null || true)"
+    fi
+
+    if ! [[ "$cpu_count" =~ ^[0-9]+$ ]] || [ "$cpu_count" -lt 1 ]; then
+        cpu_count=1
+    fi
+
+    echo "$cpu_count"
+}
+
+get_default_web_worker_count() {
+    local cpu_count
+    cpu_count="$(detect_cpu_count)"
+
+    if [ "$cpu_count" -gt 4 ]; then
+        echo "4"
+    else
+        echo "$cpu_count"
+    fi
+}
+
+configure_web_workers() {
+    WEB_WORKERS_DEFAULT="$(get_default_web_worker_count)"
+
+    if [ -z "${COMICPACKER_WEB_WORKERS:-}" ]; then
+        export COMICPACKER_WEB_WORKERS="$WEB_WORKERS_DEFAULT"
+        echo "✓ 未设置 COMICPACKER_WEB_WORKERS，使用默认值: $COMICPACKER_WEB_WORKERS"
+        return 0
+    fi
+
+    if [[ "${COMICPACKER_WEB_WORKERS}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "✓ 使用已设置的 COMICPACKER_WEB_WORKERS=$COMICPACKER_WEB_WORKERS"
+        return 0
+    fi
+
+    echo "⚠ COMICPACKER_WEB_WORKERS=${COMICPACKER_WEB_WORKERS} 无效，回退到默认值: $WEB_WORKERS_DEFAULT"
+    export COMICPACKER_WEB_WORKERS="$WEB_WORKERS_DEFAULT"
+}
 
 list_conda_envs() {
     conda info --envs 2>/dev/null | awk '
@@ -166,6 +214,10 @@ echo ""
 
 # 设置 PYTHONPATH 以确保 KCC 脚本能找到模块
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$(pwd)"
+
+# 自动配置 Web 后台 worker 数
+configure_web_workers
+echo "后台 worker 数: $COMICPACKER_WEB_WORKERS"
 
 # 启动服务器
 $PYTHON web_server.py

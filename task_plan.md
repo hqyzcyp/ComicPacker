@@ -1,55 +1,60 @@
-# Task Plan: 漫画转换性能优化（第二阶段）
+# Task Plan: CPU 利用率与单 Job 多漫画并行可行性调研
 
 ## Goal
-在第一阶段完成热点预处理优化后，继续降低真实整卷转换的峰值内存与整体耗时。第二阶段聚焦于消除“整卷图片一次性读入 + 整卷预处理后再统一写 PDF”的结构性问题，改为按章节/按压缩包增量处理，并用真实样本重新对比时间与 RSS。
+评估当前 `web_server.py` 的 3 个并行 worker 为什么对 CPU 占用提升有限；同时研究单 job 在“一个漫画目录内含多本漫画文件”场景下，是否值得从当前串行转换升级为“同一 job 内多本漫画并行转换”，若可行且收益明显，则给出可执行修改计划。
 
 ## Current Phase
-Complete
+Phase 3: 并行可行性分析与方案规划
 
 ## Phases
 ### Phase 0: Context Recovery
 - [x] 运行 session catchup 并读取现有 planning files
-- [x] 确认第一阶段优化已完成且验证通过
-- [x] 检查当前工作区改动基于第一阶段结果继续推进
+- [x] 读取 OMX 状态 / notepad / project memory
+- [x] 确认当前仓库无更深层 AGENTS 影响业务代码改动
 - **Status:** complete
 
-### Phase 1: Baseline + Design
-- [x] 对真实 ZIP / CBZ 单卷运行做时间与 RSS 基线测量
-- [x] 确认当前剩余主问题是“整卷全量持有导致的 >1GiB 峰值内存”
-- [x] 设计保持输出顺序不变的增量处理方案
+### Phase 1: Code Path Mapping
+- [x] 定位 Web worker pool、job queue 与系统资源统计入口
+- [x] 定位主转换路径（batch/book/cbz/pdf）与现有并行逻辑
+- [x] 确认单 job 内“多本漫画”当前是否为串行处理
 - **Status:** complete
 
-### Phase 2: Regression Lock + Refactor
-- [x] 为 batch/book/cbz 三条 PDF 生成路径补充端到端回归测试
-- [x] 将 `main.py` 改为按章节/按压缩包增量读取、预处理、写 PDF
-- [x] 保持现有输出命名、页顺序与书签行为不变
+### Phase 2: Baseline Measurement
+- [x] 选取代表性样本并测量当前单 job / 多 job 的 CPU 利用率与耗时
+- [x] 判断瓶颈更偏向 CPU、I/O、进程池创建开销还是串行外围逻辑
+- [x] 记录当前 3 worker 继续加大时的潜在限制因素
 - **Status:** complete
 
-### Phase 3: Verification
-- [x] 运行语法检查与完整测试
-- [x] 用真实样本重新测量时间与峰值 RSS
-- [x] 记录收益、风险和后续更大范围优化项
+### Phase 3: Parallelization Feasibility
+- [x] 评估单 job 内对多本漫画做并行转换的改造点、风险点与约束
+- [x] 估算潜在收益（吞吐 / CPU 占用 / 内存）
+- [x] 判断是否值得推进实现
+- **Status:** complete
+
+### Phase 4: Planning Output
+- [x] 汇总结论
+- [x] 若值得实施，输出分阶段修改计划、测试计划与回滚关注点
 - **Status:** complete
 
 ## Key Questions
-1. 能否在不改变输出顺序和现有接口的前提下，把 ZIP/CBZ 处理改为增量式？
-2. 这样做能否显著压低真实单卷转换的峰值 RSS？
-3. 在降低内存的同时，整卷总耗时是否也会改善，至少不明显回退？
-4. batch/book/cbz 三条路径是否都能在这一轮统一收敛到更小的内存占用模式？
+1. 当前 3 个 web worker 对 CPU 利用率提升有限，究竟卡在 Web 层、单 job 内部串行逻辑，还是图片预处理/压缩流程本身？
+2. 现有单 job 内每本漫画（ZIP/CBZ/PDF）是否确实逐本串行执行？
+3. 如果把“逐本漫画”提升为 job 内并行，是否会与现有 `ProcessPoolExecutor` 预处理并行产生过度嵌套并发？
+4. 在 12 核机器上，更高 CPU 占用是否能换来稳定吞吐提升，还是会被磁盘 IO / 内存 / 子进程开销抵消？
+5. 如果推进改造，最小可行方案应该落在哪一层：Web worker 数、预处理 worker 数、自适应限流，还是 job 内多漫画 worker pool？
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
-| 第二阶段优先解决全量持有图片的问题 | 第一阶段后，真实样本仍有约 1.1~1.2 GiB 峰值 RSS，这是最突出的剩余问题 |
-| 先补回归测试，再做结构性重排 | 这一轮会改动 PDF 生成路径，先锁住页数和生成成功率更稳妥 |
-| 采用按章节/按压缩包增量处理 | 能在不大改上层 API 的前提下，把内存占用从“整卷级”降到“章节级/单包级” |
-| 默认再叠加 32 页分块预处理 | 这样即使是单章节/默认章节的大卷，也不会再次退化成整卷级内存占用 |
+| 先做代码路径与基线测量，再讨论改造 | 用户要求的是“研究是否值得改”，需要先确认瓶颈来源而不是直接实施 |
+| 优先选择真实样本的子集做代表性压测 | 合成样本难以准确体现 ZIP/CBZ 解压、PIL 解码、PDF 写入与 KCC 等混合负载 |
+| 若做 job 内并行评估，要同时考虑与现有图片预处理进程池的叠加效应 | 外层多漫画并行 + 内层图片预处理并行，可能导致 CPU 超卖和内存放大 |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| 暂无 | - | - |
+| `omx explore` 依赖缺失（cargo not found） | 1 | 回退为直接读取源码、测试和运行本地 benchmark |
 
 ## Notes
-- 第一阶段结论与验证保留在 `findings.md` / `progress.md`，本轮只补充第二阶段证据。
-- 若第二阶段完成后仍有明显瓶颈，后续候选项包括：复用持久进程池、减少 ZIP 重复打开、进一步降低 ReportLab 重复解码、以及 Web worker 并行模型优化。
+- 现有 planning files 中保留了此前任务的长期记录；本次 `task_plan.md` 已切换为当前调研主题。
+- 当前重点是“是否值得改 + 怎么改”，不是立刻提交实现。

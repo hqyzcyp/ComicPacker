@@ -396,3 +396,108 @@
 - 多进程预处理仍是“每次 `preprocess_images()` 调用建一个进程池”；若想进一步提速，可探索在整卷范围内复用持久 worker 池。
 - ReportLab 侧仍会对传入图片再做解码；若继续追求更高性能，后续需要调查是否能减少这部分重复工作。
 - `web_server.py` 依旧是单 worker 模型；本轮继续提升的是单任务性能，不是并发任务吞吐。
+
+## Resume Verification Pass (2026-04-15)
+- 在恢复会话后重新读取 `task_plan.md` / `findings.md` / `progress.md`，确认当前任务仍是“漫画转换性能优化（第二阶段）”且计划状态为 `Complete`。
+- 重新执行本地验证：
+  - `python3 -m py_compile main.py web_server.py tests/test_preprocess.py tests/test_pdf_workflows.py` 通过
+  - `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` 通过（8 个测试）
+- 结论：当前工作区中的第二阶段实现与规划文件一致，恢复会话后未发现验证漂移或新增失败。
+
+## Web Multi-worker Upgrade Discovery (2026-04-15)
+- `web_server.py` 当前的后台执行模型是：
+  1. 全局 `job_queue = queue.Queue()`
+  2. 单个 `worker_thread()` 无限循环消费
+  3. 模块加载时只启动一个线程：`worker = threading.Thread(...); worker.start()`
+- 因此现在即使前端一次创建多个任务，也只会按 FIFO 串行处理，`pending` 任务必须等待唯一 worker 空出来。
+- 并发升级的主要技术风险不只是“多开几个线程”，还包括：
+  1. `worker_thread()` 内部直接替换全局 `sys.stdout`
+  2. `ConsoleCapture` 只写入全局 `console_output`
+  3. `cancelled_jobs` 是共享集合，但读写路径没有统一封装
+- 在单 worker 模型下，上述问题基本不暴露；一旦并发执行，最容易出现：
+  - 日志串台 / 抢占 `sys.stdout`
+  - 某个 job 的输出被另一个 job 截走
+  - pending/running 取消检查与状态切换时序变脏
+- 现有前端契约相对简单：它只依赖 `/api/jobs` 返回任务状态列表，以及 `/api/console-output` 返回“最近控制台输出”；因此后端有空间在不改协议的前提下完成 worker pool 升级。
+- 适合本轮的最小可行改造方向：
+  - 保留 `job_queue`
+  - 把单个后台线程升级为固定数量的后台线程池
+  - 引入线程本地的输出路由，而不是在 worker 内直接覆盖整个进程的 `sys.stdout`
+  - 通过环境变量控制 worker 数，默认值保持保守
+
+## Web Multi-worker Upgrade Implementation (2026-04-15)
+- `web_server.py` 现在新增了可配置 worker pool：
+  - `get_web_worker_count()`
+  - `start_worker_pool(...)`
+  - `shutdown_worker_pool(...)`
+  - `process_job(...)`
+- 模块启动后不再只保留单个 `worker` 线程对象，而是按配置启动多个后台线程，共享原有 `job_queue`。
+- 默认 worker 数为 `max(1, min(2, os.cpu_count() or 1))`，可通过环境变量 `COMICPACKER_WEB_WORKERS` 覆盖。
+- 为了避免并发任务互相覆盖输出，`sys.stdout` / `sys.stderr` 改为一次性替换成 `JobScopedOutput`：
+  - 非 job 线程：直接透传到原始 stdout/stderr
+  - job 线程：根据线程本地 `job_id` 把日志路由到 Web 控制台缓冲
+- worker 执行任务时通过 `bind_job_console(job_id)` 绑定当前线程的输出归属，因此两个并行任务的转换日志都会自动带上各自的 job 前缀。
+- `jobs_lock` 改为 `threading.RLock()`，并把取消检查统一收敛到 helper 中，降低多线程状态切换时的竞态风险。
+- job 元数据新增 `worker` 字段，便于观察某个任务最终由哪个后台 worker 执行。
+- `create_job()` 现在在入队前调用 `start_worker_pool()`，避免 worker pool 被显式停掉后再创建任务时无人消费。
+- `/api/system-stats` 额外返回：
+  - `configured_web_workers`
+  - `running_jobs`
+  - `pending_jobs`
+- `tests/test_web_workers.py` 新增 3 个回归测试，覆盖：
+  1. 两个任务可并行进入 `running`
+  2. 单 worker 忙碌时，后续 pending 任务仍可取消
+  3. 并发日志带有各自 job 前缀，不会串台
+
+## Verification Evidence: Web Multi-worker Upgrade
+- 语法检查：
+  - `python3 -m py_compile main.py web_server.py tests/test_preprocess.py tests/test_pdf_workflows.py tests/test_web_workers.py` 通过
+- 全量测试：
+  - `conda run -n comic python -m unittest discover -s tests -p 'test_*.py'` 通过（11 个测试）
+- 新增并发行为验证：
+  1. `test_jobs_can_run_in_parallel_with_multiple_workers`
+     - 结果：两个 job 可同时进入 `running`
+     - 且 `job['worker']` 显示为不同 worker
+  2. `test_pending_job_can_be_cancelled_while_another_worker_is_busy`
+     - 结果：当唯一 worker 忙碌时，第二个 pending job 可在启动前被取消
+  3. `test_console_output_keeps_job_prefixes_under_parallel_execution`
+     - 结果：并发输出带有对应 job 前缀，未出现交叉归属
+
+## Remaining Risks / Follow-up: Web Multi-worker Upgrade
+- 单个漫画转换任务本身已经会做图片预处理并行化；若同时跑多个大任务，CPU / 内存峰值可能上升，需要按机器规模调节 `COMICPACKER_WEB_WORKERS`。
+- `/api/console-output` 仍是“全局最近 N 行”视图；虽然现在有 job 前缀，不会串归属，但高并发时它依旧是聚合视图，不是 per-job 独立日志窗口。
+- 当前 worker pool 生命周期在单进程 Flask 进程内；如果未来切到多进程 WSGI/反向代理部署，需要重新审视“每个进程各自一套后台线程池”的行为。
+
+## CPU 利用率与单 Job 并行调研（2026-04-15）
+- `web_server.py` 当前 Web 层并行仅存在于 job 级：`job_queue` + `worker_threads`；默认 worker 数来自 `get_web_worker_count()`，默认值是 `min(2, os.cpu_count())`，环境变量 `COMICPACKER_WEB_WORKERS` 可覆盖。
+- `main.py` 当前真正的 CPU 并行主要发生在 `preprocess_images(...)`，其内部用 `ProcessPoolExecutor` 对单批图片预处理并行；默认 `COMICPACKER_PREPROCESS_WORKERS` 未设置时取 `min(os.cpu_count(), 4, image_count)`。
+- 因此现在的并发模型是“两层”：
+  1. Web 层：多个 job 可并发；
+  2. 单个 job 内：仅图片预处理块可并行，漫画文件（ZIP/CBZ/PDF）之间仍是串行 `for` 循环。
+- 已确认单 job 内多本漫画确实是串行：
+  - `pack_comics_by_book(...)`：按 `for book_idx, zip_file in enumerate(zip_files, 1)` 逐本处理 ZIP。
+  - `convert_cbz_to_pdf(...)`：按 `for idx, cbz_file in enumerate(cbz_files, 1)` 逐本处理 CBZ。
+  - `convert_pdf_folder_to_mobi(...)`：按 `for idx, pdf_file in enumerate(pdf_files, 1)` 逐本处理 PDF。
+  - `pack_comics_to_pdf(...)` 是按批次串行，但每个批次本身就把多本 ZIP 合并到同一个 PDF，所以不适合同样的“逐本并行”思路。
+- 样本数据规模较大：当前 `comic` 下可见 5 个漫画目录，其中 CBZ/ZIP 目录常见每卷 180~230 页，单张图像均值约 0.9MB~2.7MB；这说明任何外层并行都会明显放大内存、磁盘读取与 PDF 写入压力。
+
+
+## CPU 利用率基线与外层并行原型结果（2026-04-15）
+- **代表性样本（CBZ，小图快路径）**：`[相反的你和我][阿賀沢紅茶][Vol.01-Vol.08]`。单卷 smoke test：`Vol.01.cbz -> PDF` 用时 **58.37s**，最大 RSS **878MB**。日志显示每个 32 页块都走 `预处理 32 张图片...`（**没有** `并行进程: 4`），说明 `should_parallelize_preprocess(...)` 对该数据判定为串行。
+- **代表性样本（ZIP，大图需缩放）**：`[尖帽子的魔法工坊] Vol.01.zip -> PDF` 用时 **47.81s**，最大 RSS **803MB**。日志显示多数块都走 `预处理 32 张图片... (并行进程: 4)`，说明 book/ZIP 场景里单卷内部已经能吃到图片预处理并行。
+- **并行判定探针结果**：
+  - `相反的你和我 Vol.01.cbz`：`use_parallel=False`
+  - `欺诈游戏 Vol.01.cbz`：`use_parallel=False`
+  - `尖帽子的魔法工坊 Vol.01.zip`：`use_parallel=True`
+  - `金牌得主 Vol.01.zip`：`use_parallel=True`
+- **CBZ 外层按卷并行原型（3 卷）**：对 `Vol.01~03.cbz` 做真实原型测量：
+  - 当前串行：**176.39s**，平均 **1.01 cores**，峰值 **1.04 cores**，峰值 RSS **932.9MB**
+  - 外层并行 2：**104.54s**，平均 **1.68 cores**，峰值 **2.05 cores**，峰值 RSS **2760.8MB**
+  - 外层并行 3：**62.97s**，平均 **2.51 cores**，峰值 **3.06 cores**，峰值 RSS **3679.0MB**
+- **推论**：
+  1. 对当前 CBZ 样本，瓶颈主要不是 Web worker 数，而是“**单 job 内逐卷串行 + 单卷内部未触发图片预处理并行**”。
+  2. 在 12 核机器上，3 个并行 job/卷大致只吃到 ~3 个核心，CPU 明显仍有余量，因此**确实存在继续提高 CPU 占用率的空间**。
+  3. 外层按卷并行对 CBZ 场景收益明显：3 卷样本下从 176s 降到 63s，吞吐提升约 **2.8x**；代价是峰值内存从 ~0.9GB 升到 ~3.7GB。
+  4. ZIP/book 模式不能直接照搬同样默认值，因为其内层已经会触发 `ProcessPoolExecutor(max_workers=4)`；若外层再按卷并行，必须配合“总并发预算”避免外层 * 内层双重超卖。
+  5. `pdf -> mobi` 模式也不应激进并行：从运行中的 `kcc-c2e.py` 进程树可见，KCC 自身会再派生多个子进程，外层并发应更保守。
+- **结论**：若目标是“单 job 也能更充分利用多核”，则**值得推进 job 内多漫画并行**，但应优先覆盖 `cbz` / `book` 场景，并采用**可配置且按 mode 自适应的保守默认值**。
